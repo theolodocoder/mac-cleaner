@@ -13,7 +13,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from mac_cleaner import Candidate, default_folders, move_to_trash, partition_candidates, scan
+from mac_cleaner import (
+    Candidate, default_folders, delete_permanently, move_to_trash,
+    partition_candidates, scan,
+)
 
 
 HTML = r"""<!doctype html>
@@ -38,10 +41,10 @@ HTML = r"""<!doctype html>
 </section>
 <section class="summary"><strong id="summary">Ready to scan</strong><span class="status" id="status">Local and private</span></section>
 <div class="grid">
-  <section class="panel"><div class="panel-head"><h2>Recommended cleanup</h2><p>Old, recognizable clutter</p></div><div class="files" id="recommended"><div class="empty">Scan to find clutter</div></div><div class="panel-actions"><button class="button primary" id="cleanRecommended" disabled>Move recommended to Trash</button></div></section>
-  <section class="panel"><div class="panel-head"><h2>Needs review</h2><p>Recent or unusually large files</p></div><div class="review-note">These files are never included automatically.</div><div class="files" id="review"><div class="empty">Protected files will appear here</div></div><div class="panel-actions"><button class="button" id="cleanReview" disabled>Move selected review files…</button></div></section>
+  <section class="panel"><div class="panel-head"><h2>Recommended cleanup</h2><p>Old, recognizable clutter</p></div><div class="files" id="recommended"><div class="empty">Scan to find clutter</div></div><div class="panel-actions"><button class="button primary" id="cleanRecommended" disabled>Clean recommended files</button></div></section>
+  <section class="panel"><div class="panel-head"><h2>Needs review</h2><p>Recent or unusually large files</p></div><div class="review-note">These files are never included automatically.</div><div class="files" id="review"><div class="empty">Protected files will appear here</div></div><div class="panel-actions"><button class="button" id="cleanReview" disabled>Clean selected review files…</button></div></section>
 </div>
-<div class="foot"><span>Everything is moved to Trash and can be restored.</span><button class="button" id="quit">Stop GUI server</button></div>
+<div class="foot"><label><input type="checkbox" id="permanent"> Permanently delete instead of moving to Trash</label><button class="button" id="quit">Stop GUI server</button></div>
 </main><div class="toast" id="toast"></div>
 <script>
 const TOKEN=__TOKEN__;
@@ -54,8 +57,9 @@ function render(){ $('recommended').innerHTML=recommended.length?recommended.map
 function toast(text){$('toast').textContent=text;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',4500)}
 async function doScan(){try{$('scan').disabled=true;$('status').textContent='Scanning…';const data=await api('/api/scan',{folders:$('folders').value.split(',').map(x=>x.trim()).filter(Boolean),min_age:Number($('age').value)});recommended=data.recommended;review=data.review;$('summary').textContent=`${recommended.length} recommended · ${review.length} need review · ${data.total_size} found`;$('status').textContent=data.warnings.length?`${data.warnings.length} folder warning(s)`:'Scan complete';render();if(data.warnings.length)toast(data.warnings.join('\n'))}catch(e){toast(e.message);$('status').textContent='Scan failed'}finally{$('scan').disabled=false}}
 $('scan').onclick=doScan;
-$('cleanRecommended').onclick=async()=>{try{$('status').textContent='Moving to Trash…';const data=await api('/api/clean',{ids:recommended.map(x=>x.id),confirm_review:false});toast(`Moved ${data.moved} file(s), ${data.size}, to Trash`);await doScan()}catch(e){toast(e.message)}};
-$('cleanReview').onclick=async()=>{const ids=[...document.querySelectorAll('.review-check:checked')].map(x=>x.value);const chosen=review.filter(x=>ids.includes(x.id));if(!confirm(`These ${chosen.length} protected file(s) are recent or very large. Move them to Trash?\n\n${chosen.slice(0,8).map(x=>'• '+x.name).join('\n')}`))return;try{const data=await api('/api/clean',{ids,confirm_review:true});toast(`Moved ${data.moved} file(s), ${data.size}, to Trash`);await doScan()}catch(e){toast(e.message)}};
+async function clean(ids,containsReview){const permanent=$('permanent').checked;let permanentConfirmation='';if(permanent){permanentConfirmation=prompt(`Permanent deletion cannot be undone.\n\nType DELETE to permanently delete ${ids.length} selected file(s):`)||'';if(permanentConfirmation!=='DELETE')return}else if(containsReview){const chosen=review.filter(x=>ids.includes(x.id));if(!confirm(`These ${chosen.length} protected file(s) are recent or very large. Move them to Trash?\n\n${chosen.slice(0,8).map(x=>'• '+x.name).join('\n')}`))return}try{$('status').textContent=permanent?'Deleting permanently…':'Moving to Trash…';const data=await api('/api/clean',{ids,confirm_review:containsReview,permanent,confirm_permanent:permanentConfirmation});toast(`${data.action} ${data.changed} file(s), ${data.size}`);await doScan()}catch(e){toast(e.message)}}
+$('cleanRecommended').onclick=()=>clean(recommended.map(x=>x.id),false);
+$('cleanReview').onclick=()=>clean([...document.querySelectorAll('.review-check:checked')].map(x=>x.value),true);
 $('quit').onclick=async()=>{await api('/api/shutdown');document.body.innerHTML='<main class="shell"><h1>Mac Cleaner stopped</h1><p class="lead">You can close this tab.</p></main>'};
 fetch('/api/config',{headers:{'X-Mac-Cleaner-Token':TOKEN}}).then(x=>x.json()).then(data=>{$('folders').value=data.folders.join(', ');doScan()});
 </script></body></html>"""
@@ -182,10 +186,18 @@ class CleanerHandler(BaseHTTPRequestHandler):
             raise ValueError("Some selected files are no longer available; scan again")
         if any(item.important for item in selected) and data.get("confirm_review") is not True:
             raise ValueError("Protected files require explicit confirmation")
-        moved, bytes_moved, errors = move_to_trash(selected, Path.home() / ".Trash")
+        permanent = data.get("permanent") is True
+        if permanent and data.get("confirm_permanent") != "DELETE":
+            raise ValueError("Permanent deletion requires typing DELETE")
+        if permanent:
+            changed, bytes_changed, errors = delete_permanently(selected)
+            action = "Permanently deleted"
+        else:
+            changed, bytes_changed, errors = move_to_trash(selected, Path.home() / ".Trash")
+            action = "Moved to Trash"
         if errors:
             raise ValueError("\n".join(errors))
-        self._json(200, {"moved": moved, "size": human_size(bytes_moved)})
+        self._json(200, {"changed": changed, "size": human_size(bytes_changed), "action": action})
 
 
 def main() -> None:

@@ -164,7 +164,7 @@ def parse_number_selection(answer: str, allowed: set[int]) -> list[int]:
     return sorted(selected)
 
 
-def ask_file_selection(label: str, numbered: list[tuple[int, Candidate]]) -> list[Candidate]:
+def ask_file_selection(label: str, numbered: list[tuple[int, Candidate]], action: str = "move to Trash") -> list[Candidate]:
     """Ask once for a batch selection from a displayed candidate group."""
     allowed = {number for number, _ in numbered}
     if not allowed:
@@ -173,7 +173,7 @@ def ask_file_selection(label: str, numbered: list[tuple[int, Candidate]]) -> lis
     print("Enter a for all, file numbers/ranges such as 1,3-4, or press Enter for none.")
     while True:
         try:
-            chosen = set(parse_number_selection(input("Files to move to Trash: "), allowed))
+            chosen = set(parse_number_selection(input(f"Files to {action}: "), allowed))
             return [item for number, item in numbered if number in chosen]
         except ValueError as error:
             print(f"Invalid selection ({error}). Please try again.")
@@ -206,6 +206,22 @@ def move_to_trash(candidates: list[Candidate], trash: Path) -> tuple[int, int, l
     return moved, bytes_moved, errors
 
 
+def delete_permanently(candidates: list[Candidate]) -> tuple[int, int, list[str]]:
+    """Permanently delete regular candidate files. This cannot be undone."""
+    deleted = bytes_deleted = 0
+    errors: list[str] = []
+    for item in candidates:
+        try:
+            if item.path.is_symlink() or not item.path.is_file():
+                raise OSError("file is no longer a safe regular file")
+            item.path.unlink()
+            deleted += 1
+            bytes_deleted += item.size
+        except (OSError, PermissionError) as error:
+            errors.append(f"Failed to delete {item.path}: {error}")
+    return deleted, bytes_deleted, errors
+
+
 def partition_candidates(candidates: list[Candidate]) -> tuple[list[Candidate], list[Candidate]]:
     """Return (recommended, needs_review) without changing the scan order."""
     return (
@@ -216,7 +232,7 @@ def partition_candidates(candidates: list[Candidate]) -> tuple[list[Candidate], 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Find common macOS clutter and safely move approved files to Trash."
+        description="Find common macOS clutter and safely clean selected files."
     )
     parser.add_argument("folders", nargs="*", type=Path, help="folders to scan")
     parser.add_argument("--min-age", type=int, default=7, metavar="DAYS",
@@ -226,6 +242,8 @@ def parse_args() -> argparse.Namespace:
                         help="approve normal candidates (flagged items still require review)")
     parser.add_argument("--gui", action="store_true",
                         help="open the optional graphical interface instead of the CLI")
+    parser.add_argument("--permanent", action="store_true",
+                        help="permanently delete selected files instead of moving them to Trash")
     return parser.parse_args()
 
 
@@ -265,24 +283,34 @@ def main() -> int:
         return 0
 
     recommended, needs_review = partition_candidates(candidates)
+    selection_action = "delete permanently" if args.permanent else "move to Trash"
     recommended_numbered = [(number, item) for number, item in numbered if not item.important]
     review_numbered = [(number, item) for number, item in numbered if item.important]
     if args.yes:
         selected.extend(recommended)
     else:
-        selected.extend(ask_file_selection("Recommended cleanup", recommended_numbered))
+        selected.extend(ask_file_selection("Recommended cleanup", recommended_numbered, selection_action))
 
     if needs_review:
         selected.extend(ask_file_selection(
             "Needs review — these files are recent, large, or may be important",
             review_numbered,
+            selection_action,
         ))
 
     if not selected:
         print("Nothing selected. No files were changed.")
         return 0
-    moved, bytes_moved, errors = move_to_trash(selected, Path.home() / ".Trash")
-    print(f"Moved {moved} file(s), {human_size(bytes_moved)}, to Trash. You can restore them from Finder.")
+    if args.permanent:
+        print(f"\nWARNING: {len(selected)} file(s), {human_size(sum(x.size for x in selected))}, will be permanently deleted.")
+        if input("Type DELETE to continue: ").strip() != "DELETE":
+            print("Cancelled. No files were changed.")
+            return 0
+        changed, bytes_changed, errors = delete_permanently(selected)
+        print(f"Permanently deleted {changed} file(s), {human_size(bytes_changed)}.")
+    else:
+        changed, bytes_changed, errors = move_to_trash(selected, Path.home() / ".Trash")
+        print(f"Moved {changed} file(s), {human_size(bytes_changed)}, to Trash. You can restore them from Finder.")
     for error in errors:
         print(f"Warning: {error}", file=sys.stderr)
     return 1 if errors else 0

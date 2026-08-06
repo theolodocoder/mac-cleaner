@@ -92,6 +92,17 @@ class CleanerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not available"):
             mac_cleaner.parse_number_selection("2,4", {1, 2, 3})
 
+    def test_permanent_delete_only_removes_selected_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            selected_path = self.make_file(root, "selected.dmg", 5)
+            kept_path = self.make_file(root, "kept.dmg", 5)
+            candidate = mac_cleaner.Candidate(selected_path, 10, "downloaded installer", 5)
+            deleted, bytes_deleted, errors = mac_cleaner.delete_permanently([candidate])
+            self.assertEqual((deleted, bytes_deleted, errors), (1, 10, []))
+            self.assertFalse(selected_path.exists())
+            self.assertTrue(kept_path.exists())
+
 
 class GuiServerTests(unittest.TestCase):
     def test_local_gui_requires_token_and_returns_config(self):
@@ -112,6 +123,15 @@ class GuiServerTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             payload = json.loads(response.read())
             self.assertIn("folders", payload)
+
+            body = json.dumps({"ids": [], "permanent": True})
+            connection.request("POST", "/api/clean", body=body, headers={
+                "Content-Type": "application/json",
+                "X-Mac-Cleaner-Token": "test-token",
+            })
+            response = connection.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertIn("typing DELETE", json.loads(response.read())["error"])
         finally:
             connection.close()
             server.shutdown()
