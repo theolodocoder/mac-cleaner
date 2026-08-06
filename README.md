@@ -1,6 +1,6 @@
 # Mac Cleaner
 
-A conservative Python cleanup assistant with a native macOS GUI. It scans your Downloads,
+A conservative Python cleanup assistant for macOS with an optional native GUI. It scans your Downloads,
 Desktop, and Pictures folders for old screenshots, screen recordings, installers,
 archives, and incomplete downloads. Approved files are moved to macOS Trash—never
 permanently deleted.
@@ -11,32 +11,18 @@ permanently deleted.
 - Python 3.9 or newer
 - No third-party packages
 
-## Use the GUI
+## Use it (default CLI)
 
-Double-click `Launch Mac Cleaner.command` in Finder, or run:
-
-```bash
-python3 mac_cleaner_gui.py
-```
-
-The GUI separates results into two groups:
-
-- **Recommended cleanup:** old, recognizable clutter. One click moves the whole group to Trash without another prompt.
-- **Needs review:** recent or unusually large files. These stay protected until you select them and approve one consolidated confirmation.
-
-## Use the command line
-
-Preview first:
-
-```bash
-cd /Users/promiseokafor/Desktop/Workspaces/prodev/mac-cleaner
-python3 mac_cleaner.py --dry-run
-```
-
-Run interactively:
+The command-line interface is the default:
 
 ```bash
 python3 mac_cleaner.py
+```
+
+Preview without changing anything:
+
+```bash
+python3 mac_cleaner.py --dry-run
 ```
 
 Scan particular folders or change the minimum age:
@@ -44,6 +30,21 @@ Scan particular folders or change the minimum age:
 ```bash
 python3 mac_cleaner.py ~/Downloads ~/Movies --min-age 14
 ```
+
+## Optional GUI
+
+Open the GUI only when you want it:
+
+```bash
+python3 mac_cleaner.py --gui
+```
+
+You can also double-click `Launch Mac Cleaner.command` in Finder.
+
+The GUI separates results into two groups:
+
+- **Recommended cleanup:** old, recognizable clutter. One click moves the whole group to Trash without another prompt.
+- **Needs review:** recent or unusually large files. These stay protected until you select them and approve one consolidated confirmation.
 
 Files at least 2 GB or newer than 14 days are flagged for review. The command-line
 version asks once for the whole review group, never once per file. The program skips hidden folders, common project/cache folders, symbolic

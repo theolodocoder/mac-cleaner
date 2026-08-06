@@ -172,11 +172,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="scan only; change nothing")
     parser.add_argument("--yes", action="store_true",
                         help="approve normal candidates (flagged items still require review)")
+    parser.add_argument("--gui", action="store_true",
+                        help="open the optional graphical interface instead of the CLI")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.gui:
+        from mac_cleaner_gui import main as run_gui
+
+        run_gui()
+        return 0
     if args.min_age < 0:
         print("Error: --min-age cannot be negative.", file=sys.stderr)
         return 2
