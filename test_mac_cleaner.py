@@ -49,6 +49,15 @@ class CleanerTests(unittest.TestCase):
             self.assertEqual([item.path.name for item in found], ["yesterday.dmg"])
             self.assertFalse(found[0].important)
 
+    def test_recent_screenshot_is_visible_but_protected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.make_file(root, "Screenshot 2026-08-06 at 10.54.30.png", 0)
+            found, _ = mac_cleaner.scan([root], min_age=7)
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0].reason, "recent screenshot/recording")
+            self.assertTrue(found[0].important)
+
     def test_skips_project_trees(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

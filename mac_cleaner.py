@@ -73,9 +73,9 @@ def classify(path: Path, stat: os.stat_result, now: float, min_age: int) -> Cand
         important = stat.st_size >= 2 * 1024**3
     elif suffix in PARTIALS and age_days >= 1:
         reason = "incomplete download"
-    elif SCREENSHOT_RE.match(path.name) and age_days >= min_age:
-        reason = "old screenshot/recording"
-        important = age_days < 14 or stat.st_size >= 2 * 1024**3
+    elif SCREENSHOT_RE.match(path.name):
+        reason = "recent screenshot/recording" if age_days < min_age else "old screenshot/recording"
+        important = age_days < max(min_age, 14) or stat.st_size >= 2 * 1024**3
     elif suffix in ARCHIVES and age_days >= max(min_age, 30):
         reason = "old archive"
         important = True

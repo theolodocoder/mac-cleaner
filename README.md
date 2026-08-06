@@ -9,6 +9,9 @@ Downloaded `.dmg`/`.pkg` installers become recommended cleanup after one day.
 Archives, disk images, and other large files are protected for review. Code
 workspaces and project trees are skipped automatically.
 
+Screenshots and screen recordings appear as soon as they are found. Recent ones
+remain protected under **Needs review**; older ones become recommended cleanup.
+
 ## Requirements
 
 - macOS
