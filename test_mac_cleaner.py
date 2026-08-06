@@ -2,9 +2,13 @@ import os
 import tempfile
 import time
 import unittest
+import json
+import threading
+from http.client import HTTPConnection
 from pathlib import Path
 
 import mac_cleaner
+import mac_cleaner_gui
 
 
 class CleanerTests(unittest.TestCase):
@@ -48,6 +52,32 @@ class CleanerTests(unittest.TestCase):
         self.assertEqual(review_items, [review])
         self.assertEqual(recommended.recommendation, "Recommended")
         self.assertEqual(review.recommendation, "Needs review")
+
+
+class GuiServerTests(unittest.TestCase):
+    def test_local_gui_requires_token_and_returns_config(self):
+        server = mac_cleaner_gui.CleanerServer("test-token")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        try:
+            connection.request("GET", "/api/config")
+            response = connection.getresponse()
+            self.assertEqual(response.status, 403)
+            response.read()
+
+            connection.request("GET", "/api/config", headers={
+                "X-Mac-Cleaner-Token": "test-token"
+            })
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            payload = json.loads(response.read())
+            self.assertIn("folders", payload)
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 if __name__ == "__main__":

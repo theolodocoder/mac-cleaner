@@ -41,6 +41,10 @@ python3 mac_cleaner.py --gui
 
 You can also double-click `Launch Mac Cleaner.command` in Finder.
 
+The GUI opens as a private local page in your browser. It uses Python's standard
+library, listens only on `127.0.0.1`, and requires a new random access token each
+time it starts. No scan data leaves your Mac.
+
 The GUI separates results into two groups:
 
 - **Recommended cleanup:** old, recognizable clutter. One click moves the whole group to Trash without another prompt.
