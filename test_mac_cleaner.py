@@ -38,6 +38,26 @@ class CleanerTests(unittest.TestCase):
             self.make_file(root, "old.zip", 31)
             found, _ = mac_cleaner.scan([root], min_age=7)
             self.assertEqual([item.path.name for item in found], ["old.zip"])
+            self.assertTrue(found[0].important)
+
+    def test_installer_is_recommended_after_one_day(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.make_file(root, "today.dmg", 0)
+            self.make_file(root, "yesterday.dmg", 1)
+            found, _ = mac_cleaner.scan([root], min_age=30)
+            self.assertEqual([item.path.name for item in found], ["yesterday.dmg"])
+            self.assertFalse(found[0].important)
+
+    def test_skips_project_trees(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            project = root / "app"
+            project.mkdir()
+            (project / "package.json").write_text("{}")
+            self.make_file(project, "Screenshot old.png", 100)
+            found, _ = mac_cleaner.scan([root], min_age=7)
+            self.assertEqual(found, [])
 
     def test_refuses_home_directory(self):
         found, warnings = mac_cleaner.scan([Path.home()], min_age=7)

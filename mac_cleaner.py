@@ -19,11 +19,17 @@ SCREENSHOT_RE = re.compile(
     re.IGNORECASE,
 )
 INSTALLERS = {".dmg", ".pkg", ".mpkg"}
+DISK_IMAGES = {".iso", ".img", ".ipsw"}
 ARCHIVES = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar"}
 PARTIALS = {".download", ".crdownload", ".part"}
 SKIP_DIRS = {
     ".git", ".svn", ".hg", "node_modules", "Library", "Applications",
     "System", ".Trash", ".cache", "venv", ".venv", "__pycache__",
+    "Workspaces", "Projects", "Developer", "Pods", "vendor", "build", "dist",
+}
+PROJECT_MARKERS = {
+    ".git", ".svn", ".hg", "package.json", "pyproject.toml", "Cargo.toml",
+    "go.mod", "composer.json", "Podfile", "Gemfile",
 }
 
 
@@ -60,19 +66,28 @@ def classify(path: Path, stat: os.stat_result, now: float, min_age: int) -> Cand
     suffix = path.suffix.lower()
     reason = ""
 
-    if SCREENSHOT_RE.match(path.name) and age_days >= min_age:
-        reason = "old screenshot/recording"
-    elif suffix in INSTALLERS and age_days >= min_age:
-        reason = "old installer"
+    important = False
+    if suffix in INSTALLERS and age_days >= 1:
+        # A downloaded installer is normally disposable once installation is done.
+        reason = "downloaded installer"
+        important = stat.st_size >= 2 * 1024**3
     elif suffix in PARTIALS and age_days >= 1:
         reason = "incomplete download"
+    elif SCREENSHOT_RE.match(path.name) and age_days >= min_age:
+        reason = "old screenshot/recording"
+        important = age_days < 14 or stat.st_size >= 2 * 1024**3
     elif suffix in ARCHIVES and age_days >= max(min_age, 30):
         reason = "old archive"
+        important = True
+    elif suffix in DISK_IMAGES and age_days >= max(min_age, 14):
+        reason = "old disk image"
+        important = True
+    elif stat.st_size >= 500 * 1024**2 and age_days >= max(min_age, 7):
+        reason = "large old file"
+        important = True
     else:
         return None
 
-    # Recent or unusually large files deserve individual attention.
-    important = age_days < 14 or stat.st_size >= 2 * 1024**3
     return Candidate(path, stat.st_size, reason, age_days, important)
 
 
@@ -94,6 +109,10 @@ def scan(roots: list[Path], min_age: int) -> tuple[list[Candidate], list[str]]:
             warnings.append(f"Could not read {error.filename}: {error.strerror}")
 
         for directory, dirnames, filenames in os.walk(root, topdown=True, onerror=on_error, followlinks=False):
+            current = Path(directory)
+            if any((current / marker).exists() for marker in PROJECT_MARKERS):
+                dirnames[:] = []
+                continue
             dirnames[:] = [
                 name for name in dirnames
                 if name not in SKIP_DIRS and not name.startswith(".")
@@ -168,7 +187,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("folders", nargs="*", type=Path, help="folders to scan")
     parser.add_argument("--min-age", type=int, default=7, metavar="DAYS",
-                        help="minimum age for screenshots/installers (default: 7)")
+                        help="minimum age for screenshots and general clutter (default: 7)")
     parser.add_argument("--dry-run", action="store_true", help="scan only; change nothing")
     parser.add_argument("--yes", action="store_true",
                         help="approve normal candidates (flagged items still require review)")

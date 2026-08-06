@@ -5,6 +5,10 @@ Desktop, and Pictures folders for old screenshots, screen recordings, installers
 archives, and incomplete downloads. Approved files are moved to macOS Trash—never
 permanently deleted.
 
+Downloaded `.dmg`/`.pkg` installers become recommended cleanup after one day.
+Archives, disk images, and other large files are protected for review. Code
+workspaces and project trees are skipped automatically.
+
 ## Requirements
 
 - macOS
