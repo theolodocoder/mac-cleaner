@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Native Tkinter interface for Mac Cleaner."""
+"""Optional, dependency-free graphical interface for Mac Cleaner."""
 
 from __future__ import annotations
+
+import os
+
+# Apple's bundled Tk 8.5 emits this warning even though the classic widgets used
+# below remain functional. It must be set before tkinter is imported.
+os.environ.setdefault("TK_SILENCE_DEPRECATION", "1")
 
 import queue
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 
 from mac_cleaner import (
     Candidate,
@@ -20,119 +26,142 @@ from mac_cleaner import (
 
 
 class CleanerApp(tk.Tk):
-    BG = "#f4f5f7"
+    BG = "#f3f5f8"
     CARD = "#ffffff"
-    TEXT = "#17202a"
-    MUTED = "#657080"
+    TEXT = "#182230"
+    MUTED = "#667085"
+    BORDER = "#d0d5dd"
     BLUE = "#1769e0"
+    BLUE_ACTIVE = "#0f56bd"
     RED = "#b42318"
+    FONT = ("Helvetica", 12)
 
     def __init__(self) -> None:
         super().__init__()
         self.title("Mac Cleaner")
-        self.geometry("980x680")
-        self.minsize(820, 560)
-        self.configure(background=self.BG)
+        self.geometry("980x700")
+        self.minsize(820, 580)
+        self.configure(bg=self.BG)
 
         self.folders = list(default_folders())
         self.candidates: list[Candidate] = []
+        self.recommended_items: list[Candidate] = []
+        self.review_items: list[Candidate] = []
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.age_var = tk.StringVar(value="7")
         self.status_var = tk.StringVar(value="Ready to scan")
         self.summary_var = tk.StringVar(value="No scan results yet")
+        self.folder_var = tk.StringVar()
 
-        self._configure_styles()
         self._build_ui()
+        self._update_folder_label()
         self.after(100, self._drain_events)
 
-    def _configure_styles(self) -> None:
-        style = ttk.Style(self)
-        try:
-            style.theme_use("aqua")
-        except tk.TclError:
-            pass
-        style.configure("Title.TLabel", background=self.BG, foreground=self.TEXT,
-                        font=("Helvetica Neue", 26, "bold"))
-        style.configure("Sub.TLabel", background=self.BG, foreground=self.MUTED,
-                        font=("Helvetica Neue", 12))
-        style.configure("Card.TFrame", background=self.CARD)
-        style.configure("Card.TLabel", background=self.CARD, foreground=self.TEXT)
-        style.configure("Summary.TLabel", background=self.CARD, foreground=self.TEXT,
-                        font=("Helvetica Neue", 14, "bold"))
-        style.configure("Treeview", rowheight=28, font=("Helvetica Neue", 11))
-        style.configure("Treeview.Heading", font=("Helvetica Neue", 11, "bold"))
+    def _label(self, parent: tk.Widget, text: str = "", **kwargs: object) -> tk.Label:
+        return tk.Label(parent, text=text, bg=kwargs.pop("bg", self.BG),
+                        fg=kwargs.pop("fg", self.TEXT), font=kwargs.pop("font", self.FONT),
+                        **kwargs)
+
+    def _button(self, parent: tk.Widget, text: str, command: object,
+                primary: bool = False, **kwargs: object) -> tk.Button:
+        bg = self.BLUE if primary else self.CARD
+        fg = "white" if primary else self.TEXT
+        return tk.Button(
+            parent, text=text, command=command, bg=bg, fg=fg,
+            activebackground=self.BLUE_ACTIVE if primary else "#e9edf3",
+            activeforeground="white" if primary else self.TEXT,
+            relief="flat", bd=0, highlightthickness=1,
+            highlightbackground=self.BLUE if primary else self.BORDER,
+            font=("Helvetica", 11, "bold"), padx=14, pady=8, cursor="pointinghand",
+            **kwargs,
+        )
 
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self, padding=24)
+        outer = tk.Frame(self, bg=self.BG, padx=24, pady=22)
         outer.pack(fill="both", expand=True)
 
-        ttk.Label(outer, text="Mac Cleaner", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(
+        self._label(outer, "Mac Cleaner", font=("Helvetica", 28, "bold")).pack(anchor="w")
+        self._label(
             outer,
-            text="Safely recover space. Recommended clutter is one click; important files stay protected.",
-            style="Sub.TLabel",
-        ).pack(anchor="w", pady=(2, 18))
+            "Safely recover space. Recommended clutter is one click; important files stay protected.",
+            fg=self.MUTED,
+        ).pack(anchor="w", pady=(3, 18))
 
-        controls = ttk.Frame(outer, style="Card.TFrame", padding=14)
+        controls = tk.Frame(outer, bg=self.CARD, padx=14, pady=12,
+                            highlightthickness=1, highlightbackground=self.BORDER)
         controls.pack(fill="x")
-        self.folder_label = ttk.Label(controls, style="Card.TLabel")
-        self.folder_label.pack(side="left", fill="x", expand=True)
-        ttk.Button(controls, text="Add Folder…", command=self._add_folder).pack(side="left", padx=6)
-        ttk.Label(controls, text="Minimum age", style="Card.TLabel").pack(side="left", padx=(12, 5))
-        ttk.Combobox(controls, textvariable=self.age_var, values=("1", "7", "14", "30", "60", "90"),
-                     width=5, state="readonly").pack(side="left")
-        ttk.Label(controls, text="days", style="Card.TLabel").pack(side="left", padx=(4, 10))
-        self.scan_button = ttk.Button(controls, text="Scan Now", command=self._start_scan)
+        self._label(controls, bg=self.CARD, textvariable=self.folder_var,
+                    anchor="w").pack(side="left", fill="x", expand=True)
+        self._button(controls, "Add Folder…", self._add_folder).pack(side="left", padx=(8, 14))
+        self._label(controls, "Minimum age", bg=self.CARD).pack(side="left", padx=(0, 6))
+        age_menu = tk.OptionMenu(controls, self.age_var, "1", "7", "14", "30", "60", "90")
+        age_menu.configure(bg=self.CARD, fg=self.TEXT, relief="flat", highlightthickness=1,
+                           highlightbackground=self.BORDER, font=("Helvetica", 11), width=3)
+        age_menu["menu"].configure(font=("Helvetica", 11))
+        age_menu.pack(side="left")
+        self._label(controls, "days", bg=self.CARD).pack(side="left", padx=(4, 12))
+        self.scan_button = self._button(controls, "Scan Now", self._start_scan, primary=True)
         self.scan_button.pack(side="left")
-        self._update_folder_label()
 
-        summary = ttk.Frame(outer, style="Card.TFrame", padding=14)
+        summary = tk.Frame(outer, bg=self.CARD, padx=14, pady=12,
+                           highlightthickness=1, highlightbackground=self.BORDER)
         summary.pack(fill="x", pady=12)
-        ttk.Label(summary, textvariable=self.summary_var, style="Summary.TLabel").pack(side="left")
-        ttk.Label(summary, textvariable=self.status_var, style="Card.TLabel").pack(side="right")
+        self._label(summary, bg=self.CARD, textvariable=self.summary_var,
+                    font=("Helvetica", 14, "bold")).pack(side="left")
+        self._label(summary, bg=self.CARD, fg=self.MUTED,
+                    textvariable=self.status_var).pack(side="right")
 
-        notebook = ttk.Notebook(outer)
-        notebook.pack(fill="both", expand=True)
-        recommended_frame = ttk.Frame(notebook, padding=8)
-        review_frame = ttk.Frame(notebook, padding=8)
-        notebook.add(recommended_frame, text="Recommended cleanup")
-        notebook.add(review_frame, text="Needs review")
+        lists = tk.PanedWindow(outer, orient="horizontal", sashwidth=8, sashrelief="flat",
+                              bg=self.BG, bd=0, showhandle=False)
+        lists.pack(fill="both", expand=True)
+        recommended_card, self.recommended_list = self._make_list_card(
+            lists, "Recommended cleanup", "Safe, recognizable clutter", selectmode="browse"
+        )
+        review_card, self.review_list = self._make_list_card(
+            lists, "Needs review", "Recent or unusually large files", selectmode="extended"
+        )
+        lists.add(recommended_card, minsize=360, stretch="always")
+        lists.add(review_card, minsize=360, stretch="always")
 
-        self.recommended_tree = self._make_tree(recommended_frame, selectmode="none")
-        self.review_tree = self._make_tree(review_frame, selectmode="extended")
-
-        actions = ttk.Frame(outer)
-        actions.pack(fill="x", pady=(14, 0))
-        ttk.Label(actions, text="Everything is moved to Trash and can be restored.",
-                  style="Sub.TLabel").pack(side="left")
-        self.review_button = ttk.Button(actions, text="Move Selected Review Files…",
-                                        command=self._clean_review, state="disabled")
+        actions = tk.Frame(outer, bg=self.BG, pady=14)
+        actions.pack(fill="x")
+        self._label(actions, "Everything goes to Trash and can be restored.",
+                    fg=self.MUTED).pack(side="left")
+        self.review_button = self._button(actions, "Move Selected Review Files…", self._clean_review)
+        self.review_button.configure(state="disabled")
         self.review_button.pack(side="right")
-        self.clean_button = ttk.Button(actions, text="Move Recommended to Trash",
-                                       command=self._clean_recommended, state="disabled")
+        self.clean_button = self._button(
+            actions, "Move Recommended to Trash", self._clean_recommended, primary=True
+        )
+        self.clean_button.configure(state="disabled")
         self.clean_button.pack(side="right", padx=8)
 
-    def _make_tree(self, parent: ttk.Frame, selectmode: str) -> ttk.Treeview:
-        columns = ("size", "age", "reason", "path")
-        tree = ttk.Treeview(parent, columns=columns, show="headings", selectmode=selectmode)
-        tree.heading("size", text="Size")
-        tree.heading("age", text="Age")
-        tree.heading("reason", text="Why it was found")
-        tree.heading("path", text="File")
-        tree.column("size", width=85, anchor="e", stretch=False)
-        tree.column("age", width=70, anchor="e", stretch=False)
-        tree.column("reason", width=175, stretch=False)
-        tree.column("path", width=550)
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        tree.pack(side="left", fill="both", expand=True)
+    def _make_list_card(self, parent: tk.Widget, title: str, subtitle: str,
+                        selectmode: str) -> tuple[tk.Frame, tk.Listbox]:
+        card = tk.Frame(parent, bg=self.CARD, padx=12, pady=12,
+                        highlightthickness=1, highlightbackground=self.BORDER)
+        self._label(card, title, bg=self.CARD, font=("Helvetica", 14, "bold")).pack(anchor="w")
+        self._label(card, subtitle, bg=self.CARD, fg=self.MUTED,
+                    font=("Helvetica", 10)).pack(anchor="w", pady=(1, 9))
+        body = tk.Frame(card, bg=self.CARD)
+        body.pack(fill="both", expand=True)
+        listing = tk.Listbox(
+            body, selectmode=selectmode, bg=self.CARD, fg=self.TEXT,
+            selectbackground="#dbeafe", selectforeground=self.TEXT,
+            font=("Menlo", 10), relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=self.BORDER,
+            activestyle="none", exportselection=False,
+        )
+        scrollbar = tk.Scrollbar(body, orient="vertical", command=listing.yview)
+        listing.configure(yscrollcommand=scrollbar.set)
+        listing.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        return tree
+        return card, listing
 
     def _update_folder_label(self) -> None:
         shown = ", ".join(path.name or str(path) for path in self.folders[:3])
         extra = f" +{len(self.folders) - 3} more" if len(self.folders) > 3 else ""
-        self.folder_label.configure(text=f"Scanning: {shown}{extra}")
+        self.folder_var.set(f"Scanning: {shown}{extra}")
 
     def _add_folder(self) -> None:
         chosen = filedialog.askdirectory(title="Choose a folder to scan")
@@ -151,13 +180,16 @@ class CleanerApp(tk.Tk):
 
     def _start_scan(self) -> None:
         self._set_busy(True, "Scanning…")
-        minimum_age = int(self.age_var.get())
-        threading.Thread(target=self._scan_worker, args=(list(self.folders), minimum_age), daemon=True).start()
+        threading.Thread(
+            target=self._scan_worker,
+            args=(list(self.folders), int(self.age_var.get())),
+            daemon=True,
+        ).start()
 
     def _scan_worker(self, folders: list[Path], minimum_age: int) -> None:
         try:
             self.events.put(("scan", scan(folders, minimum_age)))
-        except Exception as error:  # Keep GUI alive on unexpected filesystem errors.
+        except Exception as error:
             self.events.put(("error", f"Scan failed: {error}"))
 
     def _drain_events(self) -> None:
@@ -179,49 +211,48 @@ class CleanerApp(tk.Tk):
 
     def _show_results(self, candidates: list[Candidate], warnings: list[str]) -> None:
         self.candidates = candidates
-        for tree in (self.recommended_tree, self.review_tree):
-            tree.delete(*tree.get_children())
-        recommended, review = partition_candidates(candidates)
-        for item in recommended:
-            self._insert(self.recommended_tree, item)
-        for item in review:
-            self._insert(self.review_tree, item)
+        self.recommended_items, self.review_items = partition_candidates(candidates)
+        self.recommended_list.delete(0, "end")
+        self.review_list.delete(0, "end")
+        for item in self.recommended_items:
+            self.recommended_list.insert("end", self._row(item))
+        for item in self.review_items:
+            self.review_list.insert("end", self._row(item))
         total = sum(item.size for item in candidates)
         self.summary_var.set(
-            f"{len(recommended)} recommended · {len(review)} need review · {human_size(total)} found"
+            f"{len(self.recommended_items)} recommended · "
+            f"{len(self.review_items)} need review · {human_size(total)} found"
         )
         self._set_busy(False, "Scan complete")
-        self.clean_button.configure(state="normal" if recommended else "disabled")
-        self.review_button.configure(state="normal" if review else "disabled")
+        self.clean_button.configure(state="normal" if self.recommended_items else "disabled")
+        self.review_button.configure(state="normal" if self.review_items else "disabled")
         if warnings:
             messagebox.showwarning("Some folders were skipped", "\n".join(warnings[:8]))
 
     @staticmethod
-    def _insert(tree: ttk.Treeview, item: Candidate) -> None:
-        tree.insert("", "end", iid=str(item.path), values=(
-            human_size(item.size), f"{item.age_days}d", item.reason, str(item.path)
-        ))
+    def _row(item: Candidate) -> str:
+        return (
+            f"{human_size(item.size):>9}  {item.age_days:>4}d  "
+            f"{item.path.name}  —  {item.reason}  —  {item.path.parent}"
+        )
 
     def _clean_recommended(self) -> None:
-        recommended, _ = partition_candidates(self.candidates)
-        if recommended:
-            self._start_clean(recommended)
+        if self.recommended_items:
+            self._start_clean(self.recommended_items)
 
     def _clean_review(self) -> None:
-        paths = set(self.review_tree.selection())
-        selected = [item for item in self.candidates if str(item.path) in paths and item.important]
+        selected = [self.review_items[index] for index in self.review_list.curselection()]
         if not selected:
             messagebox.showinfo("Select files", "Select one or more files in Needs review first.")
             return
         names = "\n".join(f"• {item.path.name} ({human_size(item.size)})" for item in selected[:8])
         if len(selected) > 8:
             names += f"\n• …and {len(selected) - 8} more"
-        approved = messagebox.askyesno(
+        if messagebox.askyesno(
             "Move important files to Trash?",
-            f"These files were protected because they are recent or very large:\n\n{names}\n\nMove them to Trash?",
+            f"These files are recent or very large:\n\n{names}\n\nMove them to Trash?",
             icon="warning",
-        )
-        if approved:
+        ):
             self._start_clean(selected)
 
     def _start_clean(self, selected: list[Candidate]) -> None:
@@ -235,7 +266,10 @@ class CleanerApp(tk.Tk):
         if errors:
             messagebox.showwarning("Cleanup finished with warnings", "\n".join(errors[:8]))
         else:
-            messagebox.showinfo("Cleanup complete", f"Moved {moved} file(s), {human_size(bytes_moved)}, to Trash.")
+            messagebox.showinfo(
+                "Cleanup complete",
+                f"Moved {moved} file(s), {human_size(bytes_moved)}, to Trash.",
+            )
         self._start_scan()
 
 
