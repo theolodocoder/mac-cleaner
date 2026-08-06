@@ -40,6 +40,15 @@ class CleanerTests(unittest.TestCase):
         self.assertEqual(found, [])
         self.assertTrue(any("Refused broad scan" in warning for warning in warnings))
 
+    def test_partitions_recommended_and_review_files(self):
+        recommended = mac_cleaner.Candidate(Path("old.dmg"), 10, "old installer", 40)
+        review = mac_cleaner.Candidate(Path("large.dmg"), 3 * 1024**3, "old installer", 40, True)
+        normal_items, review_items = mac_cleaner.partition_candidates([review, recommended])
+        self.assertEqual(normal_items, [recommended])
+        self.assertEqual(review_items, [review])
+        self.assertEqual(recommended.recommendation, "Recommended")
+        self.assertEqual(review.recommendation, "Needs review")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,10 @@ class Candidate:
     age_days: int
     important: bool = False
 
+    @property
+    def recommendation(self) -> str:
+        return "Needs review" if self.important else "Recommended"
+
 
 def human_size(size: int) -> str:
     units = ("B", "KB", "MB", "GB", "TB")
@@ -150,6 +154,14 @@ def move_to_trash(candidates: list[Candidate], trash: Path) -> tuple[int, int, l
     return moved, bytes_moved, errors
 
 
+def partition_candidates(candidates: list[Candidate]) -> tuple[list[Candidate], list[Candidate]]:
+    """Return (recommended, needs_review) without changing the scan order."""
+    return (
+        [item for item in candidates if not item.important],
+        [item for item in candidates if item.important],
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Find common macOS clutter and safely move approved files to Trash."
@@ -191,22 +203,24 @@ def main() -> int:
         print("\nDry run complete. Nothing was changed.")
         return 0
 
-    flagged = [item for item in candidates if item.important]
-    normal = [item for item in candidates if not item.important]
-    if normal and (args.yes or ask_yes_no(f"\nMove {len(normal)} normal candidate(s) to Trash?")):
-        selected.extend(normal)
+    recommended, needs_review = partition_candidates(candidates)
+    if recommended and (args.yes or ask_yes_no(
+        f"\nMove all {len(recommended)} recommended file(s) to Trash?"
+    )):
+        selected.extend(recommended)
 
-    for item in flagged:
-        if ask_yes_no(f"Move flagged file to Trash? {item.path} ({human_size(item.size)}, {item.age_days}d old)"):
-            selected.append(item)
+    if needs_review:
+        print("\nNeeds review:")
+        for item in needs_review:
+            print(f"  • {item.path} ({human_size(item.size)}, {item.age_days}d old)")
+        if ask_yes_no(
+            f"Include all {len(needs_review)} review file(s) in this cleanup?"
+        ):
+            selected.extend(needs_review)
 
     if not selected:
         print("Nothing selected. No files were changed.")
         return 0
-    if not ask_yes_no(f"Final confirmation: move {len(selected)} file(s), {human_size(sum(x.size for x in selected))}, to Trash?"):
-        print("Cancelled. No files were changed.")
-        return 0
-
     moved, bytes_moved, errors = move_to_trash(selected, Path.home() / ".Trash")
     print(f"Moved {moved} file(s), {human_size(bytes_moved)}, to Trash. You can restore them from Finder.")
     for error in errors:
