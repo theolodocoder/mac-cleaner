@@ -82,6 +82,16 @@ class CleanerTests(unittest.TestCase):
         self.assertEqual(recommended.recommendation, "Recommended")
         self.assertEqual(review.recommendation, "Needs review")
 
+    def test_parses_batch_file_selection(self):
+        allowed = {1, 2, 3, 4, 5}
+        self.assertEqual(mac_cleaner.parse_number_selection("1,3-5", allowed), [1, 3, 4, 5])
+        self.assertEqual(mac_cleaner.parse_number_selection("all", allowed), [1, 2, 3, 4, 5])
+        self.assertEqual(mac_cleaner.parse_number_selection("", allowed), [])
+
+    def test_rejects_numbers_outside_group(self):
+        with self.assertRaisesRegex(ValueError, "not available"):
+            mac_cleaner.parse_number_selection("2,4", {1, 2, 3})
+
 
 class GuiServerTests(unittest.TestCase):
     def test_local_gui_requires_token_and_returns_config(self):

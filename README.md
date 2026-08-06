@@ -26,6 +26,10 @@ The command-line interface is the default:
 python3 mac_cleaner.py
 ```
 
+After scanning, choose files in a batch: enter `a` for all recommended files,
+press Enter for none, or use numbers and ranges such as `1,3-4`. Review files
+are selected separately, without repetitive per-file prompts.
+
 Preview without changing anything:
 
 ```bash

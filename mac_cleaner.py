@@ -133,17 +133,50 @@ def scan(roots: list[Path], min_age: int) -> tuple[list[Candidate], list[str]]:
     return found, warnings
 
 
-def ask_yes_no(prompt: str, default: bool = False) -> bool:
-    hint = "[y/N]" if not default else "[Y/n]"
+def parse_number_selection(answer: str, allowed: set[int]) -> list[int]:
+    """Parse `1,3-5`, `a`, or an empty/none answer into sorted file numbers."""
+    answer = answer.strip().lower()
+    if answer in {"", "n", "none"}:
+        return []
+    if answer in {"a", "all"}:
+        return sorted(allowed)
+
+    selected: set[int] = set()
+    for part in answer.split(","):
+        part = part.strip()
+        if not part:
+            raise ValueError("empty item")
+        if "-" in part:
+            bounds = part.split("-", 1)
+            if len(bounds) != 2 or not all(value.strip().isdigit() for value in bounds):
+                raise ValueError(f"invalid range: {part}")
+            start, end = (int(value.strip()) for value in bounds)
+            if start > end:
+                raise ValueError(f"range must go from low to high: {part}")
+            selected.update(range(start, end + 1))
+        elif part.isdigit():
+            selected.add(int(part))
+        else:
+            raise ValueError(f"invalid file number: {part}")
+    invalid = selected - allowed
+    if invalid:
+        raise ValueError(f"not available in this group: {', '.join(map(str, sorted(invalid)))}")
+    return sorted(selected)
+
+
+def ask_file_selection(label: str, numbered: list[tuple[int, Candidate]]) -> list[Candidate]:
+    """Ask once for a batch selection from a displayed candidate group."""
+    allowed = {number for number, _ in numbered}
+    if not allowed:
+        return []
+    print(f"\n{label}")
+    print("Enter a for all, file numbers/ranges such as 1,3-4, or press Enter for none.")
     while True:
-        answer = input(f"{prompt} {hint} ").strip().lower()
-        if not answer:
-            return default
-        if answer in {"y", "yes"}:
-            return True
-        if answer in {"n", "no"}:
-            return False
-        print("Please enter y or n.")
+        try:
+            chosen = set(parse_number_selection(input("Files to move to Trash: "), allowed))
+            return [item for number, item in numbered if number in chosen]
+        except ValueError as error:
+            print(f"Invalid selection ({error}). Please try again.")
 
 
 def unique_trash_path(trash: Path, source: Path) -> Path:
@@ -221,7 +254,9 @@ def main() -> int:
 
     print(f"\nFound {len(candidates)} candidate(s), {human_size(sum(x.size for x in candidates))} total:\n")
     selected: list[Candidate] = []
+    numbered: list[tuple[int, Candidate]] = []
     for index, item in enumerate(candidates, 1):
+        numbered.append((index, item))
         marker = " ⚠ review" if item.important else ""
         print(f"{index:>3}. {human_size(item.size):>9}  {item.age_days:>4}d  {item.reason}{marker}\n     {item.path}")
 
@@ -230,19 +265,18 @@ def main() -> int:
         return 0
 
     recommended, needs_review = partition_candidates(candidates)
-    if recommended and (args.yes or ask_yes_no(
-        f"\nMove all {len(recommended)} recommended file(s) to Trash?"
-    )):
+    recommended_numbered = [(number, item) for number, item in numbered if not item.important]
+    review_numbered = [(number, item) for number, item in numbered if item.important]
+    if args.yes:
         selected.extend(recommended)
+    else:
+        selected.extend(ask_file_selection("Recommended cleanup", recommended_numbered))
 
     if needs_review:
-        print("\nNeeds review:")
-        for item in needs_review:
-            print(f"  • {item.path} ({human_size(item.size)}, {item.age_days}d old)")
-        if ask_yes_no(
-            f"Include all {len(needs_review)} review file(s) in this cleanup?"
-        ):
-            selected.extend(needs_review)
+        selected.extend(ask_file_selection(
+            "Needs review — these files are recent, large, or may be important",
+            review_numbered,
+        ))
 
     if not selected:
         print("Nothing selected. No files were changed.")
