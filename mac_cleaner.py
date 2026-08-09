@@ -499,13 +499,15 @@ def special_storage_candidates(
     return candidates
 
 
-def parse_number_selection(answer: str, allowed: set[int]) -> list[int]:
+def parse_number_selection(
+    answer: str, allowed: set[int], all_selection: set[int] | None = None
+) -> list[int]:
     """Parse `1,3-5`, `a`, or an empty/none answer into sorted file numbers."""
     answer = answer.strip().lower()
     if answer in {"", "n", "none"}:
         return []
     if answer in {"a", "all"}:
-        return sorted(allowed)
+        return sorted(allowed if all_selection is None else all_selection)
 
     selected: set[int] = set()
     for part in answer.split(","):
@@ -530,19 +532,36 @@ def parse_number_selection(answer: str, allowed: set[int]) -> list[int]:
     return sorted(selected)
 
 
-def ask_file_selection(label: str, numbered: list[tuple[int, Candidate]], action: str = "move to Trash") -> list[Candidate]:
-    """Ask once for a batch selection from a displayed candidate group."""
+def ask_file_selection(
+    label: str,
+    numbered: list[tuple[int, Candidate]],
+    action: str = "move to Trash",
+    all_selection: set[int] | None = None,
+) -> list[Candidate]:
+    """Ask once for a batch selection using the displayed global file numbers."""
     allowed = {number for number, _ in numbered}
     if not allowed:
         return []
     print(f"\n{label}")
-    print("Enter a for all, file numbers/ranges such as 1,3-4, or press Enter for none.")
+    print("Enter a for all recommended files, numbers/ranges such as 1,3-4, or press Enter for none.")
     while True:
         try:
-            chosen = set(parse_number_selection(input(f"Files to {action}: "), allowed))
+            chosen = set(parse_number_selection(
+                input(f"Files to {action}: "), allowed, all_selection
+            ))
             return [item for number, item in numbered if number in chosen]
         except ValueError as error:
             print(f"Invalid selection ({error}). Please try again.")
+
+
+def ask_yes_no(prompt: str) -> bool:
+    while True:
+        answer = input(f"{prompt} [y/N] ").strip().lower()
+        if not answer or answer in {"n", "no"}:
+            return False
+        if answer in {"y", "yes"}:
+            return True
+        print("Please enter y or n.")
 
 
 def history_path() -> Path:
@@ -815,21 +834,26 @@ def main() -> int:
             notify(f"Scheduled scan found {len(candidates)} item(s), {human_size(sum(x.size for x in candidates))}.")
         return 0
 
-    recommended, needs_review = partition_candidates(candidates)
+    recommended, _ = partition_candidates(candidates)
     selection_action = "delete permanently" if args.permanent else "move to Trash"
-    recommended_numbered = [(number, item) for number, item in numbered if not item.important]
-    review_numbered = [(number, item) for number, item in numbered if item.important]
+    recommended_numbers = {number for number, item in numbered if not item.important}
     if args.yes:
         selected.extend(recommended)
     else:
-        selected.extend(ask_file_selection("Recommended cleanup", recommended_numbered, selection_action))
-
-    if needs_review:
         selected.extend(ask_file_selection(
-            "Needs review — these files are recent, large, or may be important",
-            review_numbered,
+            "Select cleanup items",
+            numbered,
             selection_action,
+            recommended_numbers,
         ))
+
+    protected_selected = [item for item in selected if item.important]
+    if protected_selected and not args.permanent:
+        print("\nProtected selection:")
+        for item in protected_selected:
+            print(f"  • {item.path} ({human_size(item.size)}, {item.reason})")
+        if not ask_yes_no(f"Move these {len(protected_selected)} protected file(s) to Trash?"):
+            selected = [item for item in selected if not item.important]
 
     if not selected:
         print("Nothing selected. No files were changed.")

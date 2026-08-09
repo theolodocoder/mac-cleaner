@@ -91,10 +91,25 @@ class CleanerTests(unittest.TestCase):
         self.assertEqual(mac_cleaner.parse_number_selection("1,3-5", allowed), [1, 3, 4, 5])
         self.assertEqual(mac_cleaner.parse_number_selection("all", allowed), [1, 2, 3, 4, 5])
         self.assertEqual(mac_cleaner.parse_number_selection("", allowed), [])
+        self.assertEqual(
+            mac_cleaner.parse_number_selection("all", allowed, {1, 3}), [1, 3]
+        )
 
     def test_rejects_numbers_outside_group(self):
         with self.assertRaisesRegex(ValueError, "not available"):
             mac_cleaner.parse_number_selection("2,4", {1, 2, 3})
+
+    def test_global_selection_accepts_a_protected_file_number(self):
+        recommended = mac_cleaner.Candidate(Path("installer.dmg"), 10, "installer", 8)
+        protected = mac_cleaner.Candidate(
+            Path("Screenshot recent.png"), 20, "recent screenshot/recording", 0, True
+        )
+        numbered = [(1, recommended), (2, protected)]
+        with patch("builtins.input", return_value="2"):
+            selected = mac_cleaner.ask_file_selection(
+                "Select cleanup items", numbered, all_selection={1}
+            )
+        self.assertEqual(selected, [protected])
 
     def test_permanent_delete_only_removes_selected_file(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -39,9 +39,10 @@ The command-line interface is the default:
 python3 mac_cleaner.py
 ```
 
-After scanning, choose files in a batch: enter `a` for all recommended files,
-press Enter for none, or use numbers and ranges such as `1,3-4`. Review files
-are selected separately, without repetitive per-file prompts.
+After scanning, choose from the displayed global file numbers in one batch:
+enter `a` for every recommended file, press Enter for none, or use numbers and
+ranges such as `1,3-4`. Selecting protected files triggers one consolidated
+confirmation, never a repetitive prompt for each file.
 
 By default, selected files go to Trash. To delete them permanently instead, use
 `--permanent`; the program requires typing `DELETE` once for the selected batch:
