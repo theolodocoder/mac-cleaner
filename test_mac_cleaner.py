@@ -99,7 +99,8 @@ class CleanerTests(unittest.TestCase):
             selected_path = self.make_file(root, "selected.dmg", 5)
             kept_path = self.make_file(root, "kept.dmg", 5)
             candidate = mac_cleaner.Candidate(selected_path, 10, "downloaded installer", 5)
-            deleted, bytes_deleted, errors = mac_cleaner.delete_permanently([candidate])
+            with patch("mac_cleaner.record_cleanup"):
+                deleted, bytes_deleted, errors = mac_cleaner.delete_permanently([candidate])
             self.assertEqual((deleted, bytes_deleted, errors), (1, 10, []))
             self.assertFalse(selected_path.exists())
             self.assertTrue(kept_path.exists())
@@ -109,10 +110,12 @@ class CleanerTests(unittest.TestCase):
             path = self.make_file(Path(folder), "installer.dmg", 5, 42)
             candidate = mac_cleaner.classify(path, path.stat(), time.time(), 7)
             self.assertIsNotNone(candidate)
-            with patch("mac_cleaner.trash_item", return_value=Path("/Trash/installer.dmg")) as native:
+            with patch("mac_cleaner.trash_item", return_value=Path("/Trash/installer.dmg")) as native, \
+                    patch("mac_cleaner.record_cleanup") as journal:
                 moved, bytes_moved, errors = mac_cleaner.move_to_trash([candidate])
             self.assertEqual((moved, bytes_moved, errors), (1, 42, []))
             native.assert_called_once_with(path)
+            journal.assert_called_once()
 
     def test_changed_file_is_refused_before_trash(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -140,6 +143,29 @@ class CleanerTests(unittest.TestCase):
             self.assertEqual((deleted, bytes_deleted), (0, 0))
             self.assertIn("changed or was replaced", errors[0])
             self.assertTrue(replacement.exists())
+
+    def test_overlapping_roots_and_hard_links_are_deduplicated(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            child = root / "child"
+            child.mkdir()
+            original = self.make_file(child, "installer.dmg", 5)
+            linked = root / "linked.dmg"
+            os.link(original, linked)
+            found, warnings = mac_cleaner.scan([root, child, root], min_age=7)
+            self.assertEqual(len(found), 1)
+            self.assertTrue(any("duplicate scan folder" in warning for warning in warnings))
+            self.assertTrue(any("overlapping scan folder" in warning for warning in warnings))
+
+    def test_cleanup_history_is_json_lines(self):
+        with tempfile.TemporaryDirectory() as folder:
+            journal = Path(folder) / "history.jsonl"
+            item = mac_cleaner.Candidate(Path("old.dmg"), 50, "downloaded installer", 5)
+            with patch.dict(os.environ, {"MAC_CLEANER_HISTORY": str(journal)}):
+                mac_cleaner.record_cleanup(item, "trash", Path("/Trash/old.dmg"))
+            entry = json.loads(journal.read_text())
+            self.assertEqual(entry["action"], "trash")
+            self.assertEqual(entry["size"], 50)
 
 
 class GuiServerTests(unittest.TestCase):

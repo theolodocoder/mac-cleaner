@@ -47,6 +47,9 @@ Each candidate is fingerprinted during scanning using its filesystem device,
 inode, size, and modification timestamp. If it changes or is replaced before
 cleanup, the operation refuses that file and asks for a fresh scan.
 
+Overlapping scan roots and hard-linked files are deduplicated. Successful cleanup
+operations are recorded locally in `~/Library/Application Support/Mac Cleaner/history.jsonl`.
+
 Preview without changing anything:
 
 ```bash

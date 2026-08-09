@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import stat as stat_module
@@ -11,6 +12,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, timezone
 
 from macos_trash import trash_item
 
@@ -108,9 +110,24 @@ def scan(roots: list[Path], min_age: int) -> tuple[list[Candidate], list[str]]:
     found: list[Candidate] = []
     warnings: list[str] = []
     now = time.time()
+    seen_files: set[tuple[int, int]] = set()
 
-    for root in roots:
-        root = root.expanduser().resolve()
+    normalized_roots: list[Path] = []
+    for supplied in roots:
+        resolved = supplied.expanduser().resolve()
+        if resolved in normalized_roots:
+            warnings.append(f"Skipped duplicate scan folder: {resolved}")
+            continue
+        if any(resolved.is_relative_to(parent) for parent in normalized_roots):
+            warnings.append(f"Skipped overlapping scan folder: {resolved}")
+            continue
+        children = [parent for parent in normalized_roots if parent.is_relative_to(resolved)]
+        for child in children:
+            normalized_roots.remove(child)
+            warnings.append(f"Skipped overlapping scan folder: {child}")
+        normalized_roots.append(resolved)
+
+    for root in normalized_roots:
         if not root.exists() or not root.is_dir():
             warnings.append(f"Skipped missing folder: {root}")
             continue
@@ -136,7 +153,12 @@ def scan(roots: list[Path], min_age: int) -> tuple[list[Candidate], list[str]]:
                 try:
                     if path.is_symlink() or not path.is_file():
                         continue
-                    candidate = classify(path, path.stat(), now, min_age)
+                    file_stat = path.stat()
+                    identity = (file_stat.st_dev, file_stat.st_ino)
+                    if identity in seen_files:
+                        continue
+                    seen_files.add(identity)
+                    candidate = classify(path, file_stat, now, min_age)
                     if candidate:
                         found.append(candidate)
                 except (OSError, PermissionError) as error:
@@ -192,6 +214,29 @@ def ask_file_selection(label: str, numbered: list[tuple[int, Candidate]], action
             print(f"Invalid selection ({error}). Please try again.")
 
 
+def history_path() -> Path:
+    override = os.environ.get("MAC_CLEANER_HISTORY")
+    return Path(override).expanduser() if override else Path.home() / "Library" / "Application Support" / "Mac Cleaner" / "history.jsonl"
+
+
+def record_cleanup(item: Candidate, action: str, destination: Path | None = None) -> None:
+    """Append one successful cleanup operation to the local history journal."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "original_path": str(item.path),
+        "destination": str(destination) if destination else None,
+        "size": item.size,
+        "reason": item.reason,
+        "device_id": item.device_id,
+        "inode": item.inode,
+    }
+    target = history_path()
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with target.open("a", encoding="utf-8") as journal:
+        journal.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
 def move_to_trash(candidates: list[Candidate]) -> tuple[int, int, list[str]]:
     """Move candidates with macOS's native, volume-aware Trash operation."""
     moved = bytes_moved = 0
@@ -199,9 +244,13 @@ def move_to_trash(candidates: list[Candidate]) -> tuple[int, int, list[str]]:
     for item in candidates:
         try:
             verify_candidate_unchanged(item)
-            trash_item(item.path)
+            destination = trash_item(item.path)
             moved += 1
             bytes_moved += item.size
+            try:
+                record_cleanup(item, "trash", destination)
+            except OSError as error:
+                errors.append(f"Moved {item.path}, but could not write cleanup history: {error}")
         except (OSError, PermissionError) as error:
             errors.append(f"Failed to move {item.path}: {error}")
     return moved, bytes_moved, errors
@@ -217,6 +266,10 @@ def delete_permanently(candidates: list[Candidate]) -> tuple[int, int, list[str]
             item.path.unlink()
             deleted += 1
             bytes_deleted += item.size
+            try:
+                record_cleanup(item, "permanent_delete")
+            except OSError as error:
+                errors.append(f"Deleted {item.path}, but could not write cleanup history: {error}")
         except (OSError, PermissionError) as error:
             errors.append(f"Failed to delete {item.path}: {error}")
     return deleted, bytes_deleted, errors
