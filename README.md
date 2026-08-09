@@ -43,6 +43,10 @@ and typed confirmation.
 Normal cleanup uses macOS's native, volume-aware Trash operation for proper Finder
 integration and automatic filename-collision handling.
 
+Each candidate is fingerprinted during scanning using its filesystem device,
+inode, size, and modification timestamp. If it changes or is replaced before
+cleanup, the operation refuses that file and asks for a fresh scan.
+
 Preview without changing anything:
 
 ```bash

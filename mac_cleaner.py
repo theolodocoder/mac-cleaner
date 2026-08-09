@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import stat as stat_module
 import sys
 import time
 from dataclasses import dataclass
@@ -40,6 +41,9 @@ class Candidate:
     reason: str
     age_days: int
     important: bool = False
+    device_id: int | None = None
+    inode: int | None = None
+    modified_ns: int | None = None
 
     @property
     def recommendation(self) -> str:
@@ -88,7 +92,16 @@ def classify(path: Path, stat: os.stat_result, now: float, min_age: int) -> Cand
     else:
         return None
 
-    return Candidate(path, stat.st_size, reason, age_days, important)
+    return Candidate(
+        path=path,
+        size=stat.st_size,
+        reason=reason,
+        age_days=age_days,
+        important=important,
+        device_id=stat.st_dev,
+        inode=stat.st_ino,
+        modified_ns=stat.st_mtime_ns,
+    )
 
 
 def scan(roots: list[Path], min_age: int) -> tuple[list[Candidate], list[str]]:
@@ -185,6 +198,7 @@ def move_to_trash(candidates: list[Candidate]) -> tuple[int, int, list[str]]:
     errors: list[str] = []
     for item in candidates:
         try:
+            verify_candidate_unchanged(item)
             trash_item(item.path)
             moved += 1
             bytes_moved += item.size
@@ -199,14 +213,34 @@ def delete_permanently(candidates: list[Candidate]) -> tuple[int, int, list[str]
     errors: list[str] = []
     for item in candidates:
         try:
-            if item.path.is_symlink() or not item.path.is_file():
-                raise OSError("file is no longer a safe regular file")
+            verify_candidate_unchanged(item)
             item.path.unlink()
             deleted += 1
             bytes_deleted += item.size
         except (OSError, PermissionError) as error:
             errors.append(f"Failed to delete {item.path}: {error}")
     return deleted, bytes_deleted, errors
+
+
+def verify_candidate_unchanged(item: Candidate) -> None:
+    """Refuse files that are unsafe or no longer match their scan fingerprint."""
+    try:
+        current = item.path.lstat()
+    except OSError as error:
+        raise OSError(f"file is no longer available: {error}") from error
+
+    if not stat_module.S_ISREG(current.st_mode):
+        raise OSError("file is no longer a safe regular file")
+
+    expected = (item.device_id, item.inode, item.size, item.modified_ns)
+    # Manually constructed Candidates from integrations predating fingerprints
+    # retain the basic regular-file check. Every scanner-created Candidate has
+    # all four identity values.
+    if item.device_id is None or item.inode is None or item.modified_ns is None:
+        return
+    actual = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+    if actual != expected:
+        raise OSError("file changed or was replaced after scanning; scan again")
 
 
 def partition_candidates(candidates: list[Candidate]) -> tuple[list[Candidate], list[Candidate]]:

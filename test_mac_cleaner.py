@@ -105,11 +105,41 @@ class CleanerTests(unittest.TestCase):
             self.assertTrue(kept_path.exists())
 
     def test_move_to_trash_uses_native_macos_operation(self):
-        candidate = mac_cleaner.Candidate(Path("installer.dmg"), 42, "downloaded installer", 5)
-        with patch("mac_cleaner.trash_item", return_value=Path("/Trash/installer.dmg")) as native:
-            moved, bytes_moved, errors = mac_cleaner.move_to_trash([candidate])
-        self.assertEqual((moved, bytes_moved, errors), (1, 42, []))
-        native.assert_called_once_with(candidate.path)
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_file(Path(folder), "installer.dmg", 5, 42)
+            candidate = mac_cleaner.classify(path, path.stat(), time.time(), 7)
+            self.assertIsNotNone(candidate)
+            with patch("mac_cleaner.trash_item", return_value=Path("/Trash/installer.dmg")) as native:
+                moved, bytes_moved, errors = mac_cleaner.move_to_trash([candidate])
+            self.assertEqual((moved, bytes_moved, errors), (1, 42, []))
+            native.assert_called_once_with(path)
+
+    def test_changed_file_is_refused_before_trash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = self.make_file(root, "installer.dmg", 5, 10)
+            candidate = mac_cleaner.classify(path, path.stat(), time.time(), 7)
+            self.assertIsNotNone(candidate)
+            path.write_bytes(b"changed after scan")
+            with patch("mac_cleaner.trash_item") as native:
+                moved, bytes_moved, errors = mac_cleaner.move_to_trash([candidate])
+            self.assertEqual((moved, bytes_moved), (0, 0))
+            self.assertIn("changed or was replaced", errors[0])
+            native.assert_not_called()
+            self.assertTrue(path.exists())
+
+    def test_replaced_file_is_refused_before_permanent_delete(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = self.make_file(root, "installer.dmg", 5, 10)
+            candidate = mac_cleaner.classify(path, path.stat(), time.time(), 7)
+            self.assertIsNotNone(candidate)
+            path.unlink()
+            replacement = self.make_file(root, "installer.dmg", 5, 10)
+            deleted, bytes_deleted, errors = mac_cleaner.delete_permanently([candidate])
+            self.assertEqual((deleted, bytes_deleted), (0, 0))
+            self.assertIn("changed or was replaced", errors[0])
+            self.assertTrue(replacement.exists())
 
 
 class GuiServerTests(unittest.TestCase):
