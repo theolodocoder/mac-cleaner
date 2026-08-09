@@ -258,6 +258,27 @@ class CleanerTests(unittest.TestCase):
             self.assertTrue(homebrew.trash_only)
             self.assertTrue(homebrew.important)
 
+    def test_scan_can_be_cancelled(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.make_file(root, "installer.dmg", 5)
+            cancelled = threading.Event()
+            cancelled.set()
+            found, warnings = mac_cleaner.scan([root], 7, cancel_event=cancelled)
+            self.assertEqual(found, [])
+            self.assertTrue(any("Scan cancelled" in warning for warning in warnings))
+
+    def test_writes_machine_readable_scan_report(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            report = root / "report.json"
+            item = mac_cleaner.Candidate(Path("old.dmg"), 50, "downloaded installer", 5)
+            mac_cleaner.write_scan_report(report, [item], ["warning"], "balanced")
+            payload = json.loads(report.read_text())
+            self.assertEqual(payload["candidate_count"], 1)
+            self.assertEqual(payload["total_bytes"], 50)
+            self.assertEqual(payload["warnings"], ["warning"])
+
 
 class GuiServerTests(unittest.TestCase):
     def test_local_gui_requires_token_and_returns_config(self):
@@ -287,6 +308,31 @@ class GuiServerTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 400)
             self.assertIn("typing DELETE", json.loads(response.read())["error"])
+
+            with tempfile.TemporaryDirectory() as folder:
+                installer = Path(folder) / "installer.dmg"
+                installer.write_bytes(b"installer")
+                timestamp = time.time() - 5 * 86400
+                os.utime(installer, (timestamp, timestamp))
+                body = json.dumps({
+                    "folders": [folder], "min_age": 7, "preset": "balanced",
+                    "duplicates": False,
+                })
+                connection.request("POST", "/api/scan", body=body, headers={
+                    "Content-Type": "application/json",
+                    "X-Mac-Cleaner-Token": "test-token",
+                })
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                results = json.loads(response.read())
+                self.assertEqual(results["recommended"][0]["confidence"], 95)
+
+            connection.request("GET", "/api/progress", headers={
+                "X-Mac-Cleaner-Token": "test-token"
+            })
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertFalse(json.loads(response.read())["active"])
         finally:
             connection.close()
             server.shutdown()

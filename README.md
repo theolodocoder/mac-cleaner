@@ -56,6 +56,13 @@ Preview without changing anything:
 python3 mac_cleaner.py --dry-run
 ```
 
+Write a machine-readable report or view the local cleanup journal:
+
+```bash
+python3 mac_cleaner.py --dry-run --report cleanup-report.json
+python3 mac_cleaner.py --history
+```
+
 Scan particular folders or change the minimum age:
 
 ```bash
@@ -92,6 +99,10 @@ The GUI separates results into two groups:
 
 - **Recommended cleanup:** old, recognizable clutter. One click moves the whole group to Trash without another prompt.
 - **Needs review:** recent or unusually large files. These stay protected until you select them and approve one consolidated confirmation.
+
+It also provides live scan progress and cancellation, search, sorting, sensitivity
+presets, advanced detector toggles, Finder Quick Look previews, and recent cleanup
+history.
 
 Files at least 2 GB or newer than 14 days are flagged for review. The command-line
 version asks once for the whole review group, never once per file. The program skips hidden folders, common project/cache folders, symbolic

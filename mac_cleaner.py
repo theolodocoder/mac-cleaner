@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timezone
+from threading import Event
+from typing import Callable
 
 from macos_trash import trash_item
 
@@ -224,7 +226,11 @@ def classify(
     )
 
 
-def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[list[Candidate], list[str]]:
+def scan(
+    roots: list[Path], min_age: int, rules: Rules | None = None,
+    progress: Callable[[int, Path], None] | None = None,
+    cancel_event: Event | None = None,
+) -> tuple[list[Candidate], list[str]]:
     rules = rules or PRESETS["balanced"]
     found: list[Candidate] = []
     warnings: list[str] = []
@@ -232,6 +238,8 @@ def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[l
     seen_files: set[tuple[int, int]] = set()
     duplicate_pool: dict[int, list[tuple[Path, os.stat_result]]] = {}
     empty_folders: list[tuple[Path, os.stat_result]] = []
+    inspected = 0
+    cancelled = False
 
     normalized_roots: list[Path] = []
     for supplied in roots:
@@ -260,6 +268,9 @@ def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[l
             warnings.append(f"Could not read {error.filename}: {error.strerror}")
 
         for directory, dirnames, filenames in os.walk(root, topdown=True, onerror=on_error, followlinks=False):
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                break
             current = Path(directory)
             if any(fnmatch.fnmatch(str(current), pattern) for pattern in rules.exclude_patterns):
                 dirnames[:] = []
@@ -273,6 +284,9 @@ def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[l
                 and not (Path(directory) / name).is_symlink()
             ]
             for filename in filenames:
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    break
                 path = Path(directory) / filename
                 try:
                     if path.is_symlink() or not path.is_file():
@@ -287,6 +301,9 @@ def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[l
                     candidate = classify(path, file_stat, now, min_age, rules)
                     if candidate:
                         found.append(candidate)
+                    inspected += 1
+                    if progress and (inspected == 1 or inspected % 250 == 0):
+                        progress(inspected, current)
                 except (OSError, PermissionError) as error:
                     warnings.append(f"Could not inspect {path}: {error}")
 
@@ -296,6 +313,11 @@ def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[l
                         empty_folders.append((current, current.stat()))
                 except OSError as error:
                     warnings.append(f"Could not inspect empty folder {current}: {error}")
+        if cancelled:
+            break
+
+    if cancelled:
+        warnings.append(f"Scan cancelled after inspecting {inspected} files")
 
     existing_paths = {item.path for item in found}
     for size_group in duplicate_pool.values():
@@ -303,11 +325,16 @@ def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[l
             continue
         hashes: dict[str, list[tuple[Path, os.stat_result]]] = {}
         for path, file_stat in size_group:
+            if cancel_event and cancel_event.is_set():
+                cancelled = True
+                break
             try:
                 digest = hash_file(path)
                 hashes.setdefault(digest, []).append((path, file_stat))
             except OSError as error:
                 warnings.append(f"Could not hash {path}: {error}")
+        if cancelled:
+            break
         for matches in hashes.values():
             if len(matches) < 2:
                 continue
@@ -337,6 +364,8 @@ def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[l
 
     found = mark_older_installer_versions(found)
     found.sort(key=lambda item: item.size, reverse=True)
+    if progress:
+        progress(inspected, Path("."))
     return found, warnings
 
 
@@ -512,6 +541,41 @@ def record_cleanup(item: Candidate, action: str, destination: Path | None = None
         journal.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def read_history(limit: int = 20) -> list[dict[str, object]]:
+    target = history_path()
+    if not target.exists():
+        return []
+    entries: list[dict[str, object]] = []
+    try:
+        for line in target.read_text(encoding="utf-8").splitlines():
+            try:
+                value = json.loads(line)
+                if isinstance(value, dict):
+                    entries.append(value)
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        return []
+    return entries[-limit:][::-1]
+
+
+def candidate_dict(item: Candidate) -> dict[str, object]:
+    return {
+        "path": str(item.path), "size": item.size, "age_days": item.age_days,
+        "reason": item.reason, "category": item.category, "confidence": item.confidence,
+        "recommendation": item.recommendation, "signals": list(item.signals), "kind": item.kind,
+    }
+
+
+def write_scan_report(path: Path, candidates: list[Candidate], warnings: list[str], preset: str) -> None:
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(), "preset": preset,
+        "candidate_count": len(candidates), "total_bytes": sum(item.size for item in candidates),
+        "warnings": warnings, "candidates": [candidate_dict(item) for item in candidates],
+    }
+    path.expanduser().write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def move_to_trash(candidates: list[Candidate]) -> tuple[int, int, list[str]]:
     """Move candidates with macOS's native, volume-aware Trash operation."""
     moved = bytes_moved = 0
@@ -601,6 +665,8 @@ def parse_args() -> argparse.Namespace:
                         help="review known developer cache directories")
     parser.add_argument("--iphone-backups", action="store_true",
                         help="review local iPhone backup directories")
+    parser.add_argument("--report", type=Path, help="write scan results as a JSON report")
+    parser.add_argument("--history", action="store_true", help="show recent cleanup history and exit")
     parser.add_argument("--dry-run", action="store_true", help="scan only; change nothing")
     parser.add_argument("--yes", action="store_true",
                         help="approve normal candidates (flagged items still require review)")
@@ -613,6 +679,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.history:
+        entries = read_history()
+        if not entries:
+            print("No cleanup history yet.")
+        for entry in entries:
+            print(f"{entry.get('timestamp', '?')}  {entry.get('action', '?'):>16}  {human_size(int(entry.get('size', 0)))}\n  {entry.get('original_path', '?')}")
+        return 0
     if args.gui:
         from mac_cleaner_gui import main as run_gui
 
@@ -642,6 +715,12 @@ def main() -> int:
     candidates, warnings = scan(roots, minimum_age, rules)
     candidates.extend(special_storage_candidates(args.developer_caches, args.iphone_backups))
     candidates.sort(key=lambda item: item.size, reverse=True)
+    if args.report:
+        try:
+            write_scan_report(args.report, candidates, warnings, rules.preset)
+            print(f"Report written to {args.report.expanduser()}")
+        except OSError as error:
+            print(f"Warning: could not write report: {error}", file=sys.stderr)
 
     if not candidates:
         print("\nNo matching clutter found. Nothing was changed.")
