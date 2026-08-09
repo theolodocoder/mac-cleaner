@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "theolodocoder-mac-cleaner"
+version = "0.3.0"
+description = "A conservative, explainable macOS cleanup assistant"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "theolodocoder" }]
+keywords = ["macos", "cleanup", "storage", "cli"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: MacOS X",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only"
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["build>=1.2"]
+release = ["build>=1.2", "pyinstaller>=6.0"]
+
+[project.scripts]
+mac-cleaner = "mac_cleaner:main"
+mac-cleaner-gui = "mac_cleaner_gui:main"
+
+[project.urls]
+Homepage = "https://github.com/theolodocoder/mac-cleaner"
+Repository = "https://github.com/theolodocoder/mac-cleaner"
+Issues = "https://github.com/theolodocoder/mac-cleaner/issues"
+
+[tool.setuptools]
+py-modules = ["mac_cleaner", "mac_cleaner_gui", "macos_trash", "scheduler"]

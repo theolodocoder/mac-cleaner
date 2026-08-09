@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import mac_cleaner
 import mac_cleaner_gui
+import scheduler
 
 
 class CleanerTests(unittest.TestCase):
@@ -338,6 +339,18 @@ class GuiServerTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+
+class SchedulerTests(unittest.TestCase):
+    def test_schedule_is_report_only(self):
+        payload = scheduler.schedule_payload("daily")
+        arguments = payload["ProgramArguments"]
+        self.assertIn("--dry-run", arguments)
+        self.assertIn("--report", arguments)
+        self.assertIn("--notify", arguments)
+        self.assertNotIn("--yes", arguments)
+        self.assertNotIn("--permanent", arguments)
+        self.assertEqual(payload["StartInterval"], 86400)
 
 
 if __name__ == "__main__":

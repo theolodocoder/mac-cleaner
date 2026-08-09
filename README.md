@@ -18,6 +18,19 @@ remain protected under **Needs review**; older ones become recommended cleanup.
 - Python 3.9 or newer
 - No third-party packages
 
+## Install
+
+Run directly from the repository, or install the CLI in an isolated environment:
+
+```bash
+pipx install git+https://github.com/theolodocoder/mac-cleaner.git
+mac-cleaner --dry-run
+```
+
+Tagged releases build a Python wheel/source archive and a macOS `.app`. The app
+build script supports Developer ID signing and Apple notarization when the
+documented GitHub secrets are configured.
+
 ## Use it (default CLI)
 
 The command-line interface is the default:
@@ -103,6 +116,14 @@ The GUI separates results into two groups:
 It also provides live scan progress and cancellation, search, sorting, sensitivity
 presets, advanced detector toggles, Finder Quick Look previews, and recent cleanup
 history.
+
+Install an opt-in report-only scheduled scan. Scheduled runs never select or
+delete files; they update a JSON report and display a macOS notification:
+
+```bash
+python3 mac_cleaner.py --install-schedule weekly
+python3 mac_cleaner.py --remove-schedule
+```
 
 Files at least 2 GB or newer than 14 days are flagged for review. The command-line
 version asks once for the whole review group, never once per file. The program skips hidden folders, common project/cache folders, symbolic

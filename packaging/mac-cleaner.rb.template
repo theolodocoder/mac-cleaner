@@ -1,0 +1,19 @@
+class MacCleaner < Formula
+  include Language::Python::Virtualenv
+
+  desc "Conservative, explainable macOS cleanup assistant"
+  homepage "https://github.com/theolodocoder/mac-cleaner"
+  url "https://github.com/theolodocoder/mac-cleaner/archive/refs/tags/VERSION.tar.gz"
+  sha256 "RELEASE_SHA256"
+  license :cannot_represent
+
+  depends_on "python@3.13"
+
+  def install
+    virtualenv_install_with_resources
+  end
+
+  test do
+    assert_match "safely clean selected files", shell_output("#{bin}/mac-cleaner --help")
+  end
+end

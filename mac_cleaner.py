@@ -10,6 +10,7 @@ import json
 import os
 import re
 import stat as stat_module
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, replace
@@ -573,7 +574,15 @@ def write_scan_report(path: Path, candidates: list[Candidate], warnings: list[st
         "candidate_count": len(candidates), "total_bytes": sum(item.size for item in candidates),
         "warnings": warnings, "candidates": [candidate_dict(item) for item in candidates],
     }
-    path.expanduser().write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    target = path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def notify(message: str) -> None:
+    """Display a local macOS notification without interpolating shell code."""
+    script = "on run argv\ndisplay notification (item 1 of argv) with title \"Mac Cleaner\"\nend run"
+    subprocess.run(["/usr/bin/osascript", "-e", script, message], capture_output=True)
 
 
 def move_to_trash(candidates: list[Candidate]) -> tuple[int, int, list[str]]:
@@ -667,6 +676,10 @@ def parse_args() -> argparse.Namespace:
                         help="review local iPhone backup directories")
     parser.add_argument("--report", type=Path, help="write scan results as a JSON report")
     parser.add_argument("--history", action="store_true", help="show recent cleanup history and exit")
+    parser.add_argument("--install-schedule", choices=("daily", "weekly"),
+                        help="install a safe report-only scheduled scan")
+    parser.add_argument("--remove-schedule", action="store_true", help="remove the scheduled scan")
+    parser.add_argument("--notify", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true", help="scan only; change nothing")
     parser.add_argument("--yes", action="store_true",
                         help="approve normal candidates (flagged items still require review)")
@@ -679,6 +692,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.install_schedule or args.remove_schedule:
+        from scheduler import install_schedule, remove_schedule
+        try:
+            if args.remove_schedule:
+                print("Scheduled scan removed." if remove_schedule() else "No scheduled scan was installed.")
+            else:
+                print(f"Scheduled scan installed: {install_schedule(args.install_schedule)}")
+            return 0
+        except OSError as error:
+            print(f"Error: {error}", file=sys.stderr)
+            return 1
     if args.history:
         entries = read_history()
         if not entries:
@@ -724,6 +748,8 @@ def main() -> int:
 
     if not candidates:
         print("\nNo matching clutter found. Nothing was changed.")
+        if args.notify:
+            notify("Scheduled scan complete: no clutter found.")
         for warning in warnings:
             print(f"Warning: {warning}", file=sys.stderr)
         return 0
@@ -742,6 +768,8 @@ def main() -> int:
 
     if args.dry_run:
         print("\nDry run complete. Nothing was changed.")
+        if args.notify:
+            notify(f"Scheduled scan found {len(candidates)} item(s), {human_size(sum(x.size for x in candidates))}.")
         return 0
 
     recommended, needs_review = partition_candidates(candidates)
@@ -775,6 +803,8 @@ def main() -> int:
         print(f"Moved {changed} file(s), {human_size(bytes_changed)}, to Trash. You can restore them from Finder.")
     for error in errors:
         print(f"Warning: {error}", file=sys.stderr)
+    if args.notify:
+        notify(f"Cleanup processed {changed} item(s), {human_size(bytes_changed)}.")
     return 1 if errors else 0
 
 

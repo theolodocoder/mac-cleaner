@@ -1,0 +1,5 @@
+include README.md
+include config.example.json
+include Launch?Mac?Cleaner.command
+recursive-include scripts *.sh
+recursive-include packaging *.template
