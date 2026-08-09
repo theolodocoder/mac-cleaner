@@ -63,6 +63,8 @@ PRESETS: dict[str, Rules] = {
     "aggressive": Rules("aggressive", 1, 7, 14, 7, 3, 250 * 1024**2),
 }
 
+_INSTALLED_APP_FAMILIES: set[str] | None = None
+
 
 def default_config_path() -> Path:
     return Path.home() / ".config" / "mac-cleaner" / "config.json"
@@ -176,9 +178,13 @@ def classify(
         # A downloaded installer is normally disposable once installation is done.
         reason = "downloaded installer"
         category = "Installers"
-        confidence = 95
+        installed = likely_app_is_installed(path)
+        confidence = 98 if installed else 88
         important = stat.st_size >= 2 * 1024**3
-        signals = [f"installer file ({suffix})", f"{age_days} days old"]
+        signals = [
+            f"installer file ({suffix})", f"{age_days} days old",
+            "matching application found" if installed else "installation status unknown",
+        ]
     elif suffix in PARTIALS and age_days >= 1:
         reason = "incomplete download"
         category = "Incomplete downloads"
@@ -385,6 +391,29 @@ def installer_family(path: Path) -> str:
     return re.sub(r"[^a-z]+", "", name)
 
 
+def installed_app_families() -> set[str]:
+    global _INSTALLED_APP_FAMILIES
+    if _INSTALLED_APP_FAMILIES is None:
+        families: set[str] = set()
+        for root in (Path("/Applications"), Path.home() / "Applications", Path("/System/Applications")):
+            try:
+                families.update(installer_family(path) for path in root.glob("*.app"))
+            except OSError:
+                continue
+        _INSTALLED_APP_FAMILIES = {family for family in families if family}
+    return _INSTALLED_APP_FAMILIES
+
+
+def likely_app_is_installed(installer: Path) -> bool:
+    family = installer_family(installer)
+    if len(family) < 4:
+        return False
+    return any(
+        family.startswith(app) or app.startswith(family)
+        for app in installed_app_families() if len(app) >= 4
+    )
+
+
 def mark_older_installer_versions(candidates: list[Candidate]) -> list[Candidate]:
     groups: dict[str, list[Candidate]] = {}
     for item in candidates:
@@ -575,6 +604,20 @@ def write_scan_report(path: Path, candidates: list[Candidate], warnings: list[st
         "warnings": warnings, "candidates": [candidate_dict(item) for item in candidates],
     }
     target = path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def update_cleanup_report(path: Path, action: str, changed: int, bytes_changed: int, errors: list[str]) -> None:
+    target = path.expanduser()
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    payload["cleanup"] = {
+        "completed_at": datetime.now(timezone.utc).isoformat(), "action": action,
+        "changed": changed, "bytes_reclaimed": bytes_changed, "errors": errors,
+    }
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -797,12 +840,19 @@ def main() -> int:
             print("Cancelled. No files were changed.")
             return 0
         changed, bytes_changed, errors = delete_permanently(selected)
+        cleanup_action = "permanent_delete"
         print(f"Permanently deleted {changed} file(s), {human_size(bytes_changed)}.")
     else:
         changed, bytes_changed, errors = move_to_trash(selected)
+        cleanup_action = "trash"
         print(f"Moved {changed} file(s), {human_size(bytes_changed)}, to Trash. You can restore them from Finder.")
     for error in errors:
         print(f"Warning: {error}", file=sys.stderr)
+    if args.report:
+        try:
+            update_cleanup_report(args.report, cleanup_action, changed, bytes_changed, errors)
+        except OSError as error:
+            print(f"Warning: could not update cleanup report: {error}", file=sys.stderr)
     if args.notify:
         notify(f"Cleanup processed {changed} item(s), {human_size(bytes_changed)}.")
     return 1 if errors else 0

@@ -50,7 +50,7 @@ class CleanerTests(unittest.TestCase):
             found, _ = mac_cleaner.scan([root], min_age=30)
             self.assertEqual([item.path.name for item in found], ["yesterday.dmg"])
             self.assertFalse(found[0].important)
-            self.assertEqual(found[0].confidence, 95)
+            self.assertGreaterEqual(found[0].confidence, 88)
             self.assertEqual(found[0].category, "Installers")
 
     def test_recent_screenshot_is_visible_but_protected(self):
@@ -279,6 +279,17 @@ class CleanerTests(unittest.TestCase):
             self.assertEqual(payload["candidate_count"], 1)
             self.assertEqual(payload["total_bytes"], 50)
             self.assertEqual(payload["warnings"], ["warning"])
+            mac_cleaner.update_cleanup_report(report, "trash", 1, 50, [])
+            payload = json.loads(report.read_text())
+            self.assertEqual(payload["cleanup"]["bytes_reclaimed"], 50)
+
+    def test_installer_confidence_increases_when_app_is_installed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_file(Path(folder), "Example-App-2.0.dmg", 5)
+            with patch("mac_cleaner.installed_app_families", return_value={"exampleapp"}):
+                candidate = mac_cleaner.classify(path, path.stat(), time.time(), 7)
+            self.assertEqual(candidate.confidence, 98)
+            self.assertIn("matching application found", candidate.signals)
 
 
 class GuiServerTests(unittest.TestCase):
@@ -326,7 +337,7 @@ class GuiServerTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 results = json.loads(response.read())
-                self.assertEqual(results["recommended"][0]["confidence"], 95)
+                self.assertGreaterEqual(results["recommended"][0]["confidence"], 88)
 
             connection.request("GET", "/api/progress", headers={
                 "X-Mac-Cleaner-Token": "test-token"

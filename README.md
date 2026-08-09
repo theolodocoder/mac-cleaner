@@ -125,9 +125,11 @@ python3 mac_cleaner.py --install-schedule weekly
 python3 mac_cleaner.py --remove-schedule
 ```
 
-Files at least 2 GB or newer than 14 days are flagged for review. The command-line
-version asks once for the whole review group, never once per file. The program skips hidden folders, common project/cache folders, symbolic
-links, and refuses to scan `/` or your entire home directory.
+Confidence combines file type, age, size, capture naming, duplicate hashes, and
+whether an installer appears to match an installed application. Low-confidence,
+recent, duplicate, archive, backup, and unusually large results remain protected
+for review. The program skips hidden folders, common project/cache folders,
+symbolic links, and refuses to scan `/` or your entire home directory.
 
 macOS may ask you to grant Terminal access to Desktop, Downloads, or Pictures.
 
