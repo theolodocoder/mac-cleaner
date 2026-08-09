@@ -9,6 +9,9 @@
     "*/Important/*",
     "*/Client Work/*"
   ],
+  "detect_duplicates": true,
+  "duplicate_min_bytes": 1048576,
+  "detect_empty_folders": false,
   "thresholds": {
     "installer_age": 1,
     "screenshot_recommended_age": 14,

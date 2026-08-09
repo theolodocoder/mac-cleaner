@@ -194,6 +194,70 @@ class CleanerTests(unittest.TestCase):
             found, _ = mac_cleaner.scan([root], min_age=7, rules=rules)
             self.assertEqual(found, [])
 
+    def test_detects_byte_for_byte_duplicates_for_review(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            content = b"duplicate" * 150_000
+            (root / "original.bin").write_bytes(content)
+            (root / "copy.bin").write_bytes(content)
+            found, _ = mac_cleaner.scan([root], min_age=7)
+            duplicates = [item for item in found if item.category == "Duplicates"]
+            self.assertEqual(len(duplicates), 1)
+            self.assertTrue(duplicates[0].important)
+            self.assertEqual(duplicates[0].confidence, 70)
+
+    def test_empty_folder_detection_is_opt_in(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            empty = root / "empty"
+            empty.mkdir()
+            hidden, _ = mac_cleaner.scan([root], 7)
+            shown, _ = mac_cleaner.scan([root], 7, mac_cleaner.Rules(detect_empty_folders=True))
+            self.assertEqual(hidden, [])
+            self.assertEqual([item.path for item in shown], [empty.resolve()])
+            self.assertEqual(shown[0].kind, "directory")
+
+    def test_nonempty_storage_directory_refuses_permanent_delete(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "cache"
+            path.mkdir()
+            (path / "data").write_text("cache")
+            folder_stat = path.stat()
+            item = mac_cleaner.Candidate(
+                path, 5, "developer cache", 1, True,
+                folder_stat.st_dev, folder_stat.st_ino, folder_stat.st_mtime_ns,
+                85, "Developer caches", (), "directory", folder_stat.st_size, True,
+            )
+            deleted, _, errors = mac_cleaner.delete_permanently([item])
+            self.assertEqual(deleted, 0)
+            self.assertIn("only be moved to Trash", errors[0])
+            self.assertTrue(path.exists())
+
+    def test_marks_older_installer_versions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            older = self.make_file(root, "Example-App-1.0-arm64.dmg", 20)
+            newer = self.make_file(root, "Example App 2.0 Apple Silicon.dmg", 5)
+            found, _ = mac_cleaner.scan([root], 7)
+            by_path = {item.path: item for item in found}
+            self.assertEqual(by_path[older.resolve()].category, "Older installers")
+            self.assertEqual(by_path[older.resolve()].confidence, 97)
+            self.assertEqual(by_path[newer.resolve()].category, "Installers")
+
+    def test_developer_cache_detection_is_directory_level_and_trash_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            cache = root / "Library/Caches/Homebrew"
+            cache.mkdir(parents=True)
+            (cache / "download").write_bytes(b"cache-data")
+            with patch("mac_cleaner.Path.home", return_value=root):
+                found = mac_cleaner.special_storage_candidates(include_developer_caches=True)
+            homebrew = next(item for item in found if item.path == cache)
+            self.assertEqual(homebrew.size, 10)
+            self.assertEqual(homebrew.kind, "directory")
+            self.assertTrue(homebrew.trash_only)
+            self.assertTrue(homebrew.important)
+
 
 class GuiServerTests(unittest.TestCase):
     def test_local_gui_requires_token_and_returns_config(self):

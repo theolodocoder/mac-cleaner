@@ -86,6 +86,7 @@ def serialize(item: Candidate) -> dict[str, Any]:
         "reason": item.reason, "important": item.important,
         "confidence": item.confidence, "category": item.category,
         "signals": list(item.signals),
+        "kind": item.kind, "trash_only": item.trash_only,
     }
 
 

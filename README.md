@@ -68,6 +68,12 @@ or `aggressive`. Copy `config.example.json` to
 thresholds. Every result includes a category, confidence percentage, and the
 signals used to classify it.
 
+Duplicate detection is enabled by default for files of at least 1 MB. It hashes
+only same-size groups and protects matches for review. Use `--no-duplicates` to
+disable it or `--empty-folders` to include empty directories. Known developer
+caches and local iPhone backups are available as explicitly reviewed, Trash-only
+directory candidates through `--developer-caches` and `--iphone-backups`.
+
 ## Optional GUI
 
 Open the GUI only when you want it:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -48,6 +49,9 @@ class Rules:
     large_file_bytes: int = 500 * 1024**2
     exclude_patterns: tuple[str, ...] = ()
     include_folders: tuple[Path, ...] = ()
+    detect_duplicates: bool = True
+    duplicate_min_bytes: int = 1024**2
+    detect_empty_folders: bool = False
 
 
 PRESETS: dict[str, Rules] = {
@@ -98,11 +102,21 @@ def load_rules(config_path: Path | None = None, preset_override: str | None = No
         raise ValueError("exclude_patterns must be a list of strings")
     if not isinstance(include, list) or not all(isinstance(value, str) for value in include):
         raise ValueError("include_folders must be a list of paths")
+    detect_duplicates = payload.get("detect_duplicates", rules.detect_duplicates)
+    detect_empty_folders = payload.get("detect_empty_folders", rules.detect_empty_folders)
+    duplicate_min_bytes = payload.get("duplicate_min_bytes", rules.duplicate_min_bytes)
+    if not isinstance(detect_duplicates, bool) or not isinstance(detect_empty_folders, bool):
+        raise ValueError("detection feature flags must be true or false")
+    if isinstance(duplicate_min_bytes, bool) or not isinstance(duplicate_min_bytes, int) or duplicate_min_bytes < 0:
+        raise ValueError("duplicate_min_bytes must be a non-negative integer")
     return replace(
         rules,
         **overrides,
         exclude_patterns=tuple(exclude),
         include_folders=tuple(Path(value).expanduser() for value in include),
+        detect_duplicates=detect_duplicates,
+        duplicate_min_bytes=duplicate_min_bytes,
+        detect_empty_folders=detect_empty_folders,
     )
 
 
@@ -119,6 +133,9 @@ class Candidate:
     confidence: int = 0
     category: str = "Other"
     signals: tuple[str, ...] = ()
+    kind: str = "file"
+    stat_size: int | None = None
+    trash_only: bool = False
 
     @property
     def recommendation(self) -> str:
@@ -203,6 +220,7 @@ def classify(
         confidence=confidence,
         category=category,
         signals=tuple(signals),
+        stat_size=stat.st_size,
     )
 
 
@@ -212,6 +230,8 @@ def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[l
     warnings: list[str] = []
     now = time.time()
     seen_files: set[tuple[int, int]] = set()
+    duplicate_pool: dict[int, list[tuple[Path, os.stat_result]]] = {}
+    empty_folders: list[tuple[Path, os.stat_result]] = []
 
     normalized_roots: list[Path] = []
     for supplied in roots:
@@ -262,14 +282,162 @@ def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[l
                     if identity in seen_files:
                         continue
                     seen_files.add(identity)
+                    if rules.detect_duplicates and file_stat.st_size >= rules.duplicate_min_bytes:
+                        duplicate_pool.setdefault(file_stat.st_size, []).append((path, file_stat))
                     candidate = classify(path, file_stat, now, min_age, rules)
                     if candidate:
                         found.append(candidate)
                 except (OSError, PermissionError) as error:
                     warnings.append(f"Could not inspect {path}: {error}")
 
+            if rules.detect_empty_folders and not dirnames and not filenames:
+                try:
+                    if not any(current.iterdir()):
+                        empty_folders.append((current, current.stat()))
+                except OSError as error:
+                    warnings.append(f"Could not inspect empty folder {current}: {error}")
+
+    existing_paths = {item.path for item in found}
+    for size_group in duplicate_pool.values():
+        if len(size_group) < 2:
+            continue
+        hashes: dict[str, list[tuple[Path, os.stat_result]]] = {}
+        for path, file_stat in size_group:
+            try:
+                digest = hash_file(path)
+                hashes.setdefault(digest, []).append((path, file_stat))
+            except OSError as error:
+                warnings.append(f"Could not hash {path}: {error}")
+        for matches in hashes.values():
+            if len(matches) < 2:
+                continue
+            matches.sort(key=lambda pair: (pair[1].st_mtime_ns, len(str(pair[0]))))
+            original = matches[0][0]
+            for path, file_stat in matches[1:]:
+                if path in existing_paths:
+                    continue
+                age_days = max(0, int((now - file_stat.st_mtime) / 86400))
+                found.append(Candidate(
+                    path=path, size=file_stat.st_size, reason="byte-for-byte duplicate",
+                    age_days=age_days, important=True, device_id=file_stat.st_dev,
+                    inode=file_stat.st_ino, modified_ns=file_stat.st_mtime_ns,
+                    confidence=70, category="Duplicates",
+                    signals=(f"identical SHA-256 content to {original}",),
+                    stat_size=file_stat.st_size,
+                ))
+                existing_paths.add(path)
+
+    for path, folder_stat in empty_folders:
+        found.append(Candidate(
+            path=path, size=0, reason="empty folder", age_days=max(0, int((now - folder_stat.st_mtime) / 86400)),
+            important=False, device_id=folder_stat.st_dev, inode=folder_stat.st_ino,
+            modified_ns=folder_stat.st_mtime_ns, confidence=98, category="Empty folders",
+            signals=("contains no files or folders",), kind="directory", stat_size=folder_stat.st_size,
+        ))
+
+    found = mark_older_installer_versions(found)
     found.sort(key=lambda item: item.size, reverse=True)
     return found, warnings
+
+
+def hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def installer_family(path: Path) -> str:
+    name = path.stem.lower()
+    name = re.sub(r"\b(?:macos|mac|apple|silicon|intel|universal|arm64|aarch64|x86_64)\b", " ", name)
+    name = re.sub(r"\bv?\d+(?:[._-]\d+)*\b", " ", name)
+    return re.sub(r"[^a-z]+", "", name)
+
+
+def mark_older_installer_versions(candidates: list[Candidate]) -> list[Candidate]:
+    groups: dict[str, list[Candidate]] = {}
+    for item in candidates:
+        if item.category == "Installers":
+            family = installer_family(item.path)
+            if family:
+                groups.setdefault(family, []).append(item)
+    replacements: dict[Path, Candidate] = {}
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        newest = max(group, key=lambda item: item.modified_ns or 0)
+        for item in group:
+            if item is newest:
+                continue
+            replacements[item.path] = replace(
+                item,
+                reason="older installer version",
+                category="Older installers",
+                confidence=97,
+                signals=item.signals + (f"newer related installer found: {newest.path.name}",),
+            )
+    return [replacements.get(item.path, item) for item in candidates]
+
+
+def directory_size(path: Path) -> int:
+    total = 0
+    for directory, dirnames, filenames in os.walk(path, followlinks=False):
+        dirnames[:] = [name for name in dirnames if not (Path(directory) / name).is_symlink()]
+        for filename in filenames:
+            child = Path(directory) / filename
+            try:
+                if not child.is_symlink():
+                    total += child.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def special_storage_candidates(
+    include_developer_caches: bool = False, include_iphone_backups: bool = False
+) -> list[Candidate]:
+    """Return opt-in, directory-level storage candidates that always require review."""
+    home = Path.home()
+    specs: list[tuple[Path, str, str, int]] = []
+    if include_developer_caches:
+        specs.extend([
+            (home / "Library/Developer/Xcode/DerivedData", "Developer caches", "Xcode DerivedData", 82),
+            (home / "Library/Developer/CoreSimulator/Caches", "Developer caches", "simulator caches", 82),
+            (home / "Library/Caches/Homebrew", "Developer caches", "Homebrew cache", 85),
+            (home / ".npm/_cacache", "Developer caches", "npm download cache", 85),
+            (home / "Library/Caches/pip", "Developer caches", "pip download cache", 85),
+        ])
+    if include_iphone_backups:
+        backup_root = home / "Library/Application Support/MobileSync/Backup"
+        if backup_root.is_dir():
+            try:
+                specs.extend(
+                    (child, "iPhone backups", "local iPhone backup", 35)
+                    for child in backup_root.iterdir() if child.is_dir() and not child.is_symlink()
+                )
+            except OSError:
+                pass
+
+    now = time.time()
+    candidates: list[Candidate] = []
+    for path, category, reason, confidence in specs:
+        try:
+            folder_stat = path.stat()
+            size = directory_size(path)
+            if size == 0:
+                continue
+            candidates.append(Candidate(
+                path=path, size=size, reason=reason,
+                age_days=max(0, int((now - folder_stat.st_mtime) / 86400)),
+                important=True, device_id=folder_stat.st_dev, inode=folder_stat.st_ino,
+                modified_ns=folder_stat.st_mtime_ns, confidence=confidence, category=category,
+                signals=("opt-in storage location", "directory will only be moved to Trash"),
+                kind="directory", stat_size=folder_stat.st_size, trash_only=True,
+            ))
+        except OSError:
+            continue
+    return candidates
 
 
 def parse_number_selection(answer: str, allowed: set[int]) -> list[int]:
@@ -334,6 +502,9 @@ def record_cleanup(item: Candidate, action: str, destination: Path | None = None
         "reason": item.reason,
         "device_id": item.device_id,
         "inode": item.inode,
+        "kind": item.kind,
+        "category": item.category,
+        "confidence": item.confidence,
     }
     target = history_path()
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -367,7 +538,12 @@ def delete_permanently(candidates: list[Candidate]) -> tuple[int, int, list[str]
     for item in candidates:
         try:
             verify_candidate_unchanged(item)
-            item.path.unlink()
+            if item.kind == "directory":
+                if item.trash_only:
+                    raise OSError("this directory is protected and can only be moved to Trash")
+                item.path.rmdir()
+            else:
+                item.path.unlink()
             deleted += 1
             bytes_deleted += item.size
             try:
@@ -386,10 +562,11 @@ def verify_candidate_unchanged(item: Candidate) -> None:
     except OSError as error:
         raise OSError(f"file is no longer available: {error}") from error
 
-    if not stat_module.S_ISREG(current.st_mode):
-        raise OSError("file is no longer a safe regular file")
+    expected_mode = stat_module.S_ISDIR if item.kind == "directory" else stat_module.S_ISREG
+    if not expected_mode(current.st_mode):
+        raise OSError(f"item is no longer a safe {item.kind}")
 
-    expected = (item.device_id, item.inode, item.size, item.modified_ns)
+    expected = (item.device_id, item.inode, item.stat_size if item.stat_size is not None else item.size, item.modified_ns)
     # Manually constructed Candidates from integrations predating fingerprints
     # retain the basic regular-file check. Every scanner-created Candidate has
     # all four identity values.
@@ -417,6 +594,13 @@ def parse_args() -> argparse.Namespace:
                         help="minimum age for screenshots and general clutter")
     parser.add_argument("--preset", choices=tuple(PRESETS), help="cleanup sensitivity preset")
     parser.add_argument("--config", type=Path, help="path to JSON configuration")
+    parser.add_argument("--duplicates", action=argparse.BooleanOptionalAction, default=None,
+                        help="enable or disable byte-for-byte duplicate detection")
+    parser.add_argument("--empty-folders", action="store_true", help="include empty folders")
+    parser.add_argument("--developer-caches", action="store_true",
+                        help="review known developer cache directories")
+    parser.add_argument("--iphone-backups", action="store_true",
+                        help="review local iPhone backup directories")
     parser.add_argument("--dry-run", action="store_true", help="scan only; change nothing")
     parser.add_argument("--yes", action="store_true",
                         help="approve normal candidates (flagged items still require review)")
@@ -443,6 +627,12 @@ def main() -> int:
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2
+    if args.duplicates is not None or args.empty_folders:
+        rules = replace(
+            rules,
+            detect_duplicates=rules.detect_duplicates if args.duplicates is None else args.duplicates,
+            detect_empty_folders=rules.detect_empty_folders or args.empty_folders,
+        )
     minimum_age = args.min_age if args.min_age is not None else 7
 
     roots = args.folders or list(rules.include_folders) or default_folders()
@@ -450,6 +640,8 @@ def main() -> int:
     for root in roots:
         print(f"  • {root.expanduser()}")
     candidates, warnings = scan(roots, minimum_age, rules)
+    candidates.extend(special_storage_candidates(args.developer_caches, args.iphone_backups))
+    candidates.sort(key=lambda item: item.size, reverse=True)
 
     if not candidates:
         print("\nNo matching clutter found. Nothing was changed.")
