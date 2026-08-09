@@ -1,9 +1,9 @@
 # Mac Cleaner
 
-A conservative Python cleanup assistant for macOS with an optional native GUI. It scans your Downloads,
+A conservative Python cleanup assistant for macOS with an optional local browser GUI. It scans your Downloads,
 Desktop, and Pictures folders for old screenshots, screen recordings, installers,
-archives, and incomplete downloads. Approved files are moved to macOS Trash—never
-permanently deleted.
+archives, and incomplete downloads. Files go to Trash by default, with permanent
+deletion available only as an explicitly confirmed option.
 
 Downloaded `.dmg`/`.pkg` installers become recommended cleanup after one day.
 Archives, disk images, and other large files are protected for review. Code
@@ -39,6 +39,9 @@ python3 mac_cleaner.py --permanent
 
 Permanent deletion cannot be undone. The optional GUI exposes the same setting
 and typed confirmation.
+
+Normal cleanup uses macOS's native, volume-aware Trash operation for proper Finder
+integration and automatic filename-collision handling.
 
 Preview without changing anything:
 

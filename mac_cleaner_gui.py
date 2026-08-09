@@ -193,7 +193,7 @@ class CleanerHandler(BaseHTTPRequestHandler):
             changed, bytes_changed, errors = delete_permanently(selected)
             action = "Permanently deleted"
         else:
-            changed, bytes_changed, errors = move_to_trash(selected, Path.home() / ".Trash")
+            changed, bytes_changed, errors = move_to_trash(selected)
             action = "Moved to Trash"
         if errors:
             raise ValueError("\n".join(errors))

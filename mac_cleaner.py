@@ -6,12 +6,12 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
+
+from macos_trash import trash_item
 
 
 SCREENSHOT_RE = re.compile(
@@ -179,26 +179,13 @@ def ask_file_selection(label: str, numbered: list[tuple[int, Candidate]], action
             print(f"Invalid selection ({error}). Please try again.")
 
 
-def unique_trash_path(trash: Path, source: Path) -> Path:
-    target = trash / source.name
-    if not target.exists():
-        return target
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    counter = 1
-    while True:
-        target = trash / f"{source.stem}-{stamp}-{counter}{source.suffix}"
-        if not target.exists():
-            return target
-        counter += 1
-
-
-def move_to_trash(candidates: list[Candidate], trash: Path) -> tuple[int, int, list[str]]:
-    trash.mkdir(mode=0o700, exist_ok=True)
+def move_to_trash(candidates: list[Candidate]) -> tuple[int, int, list[str]]:
+    """Move candidates with macOS's native, volume-aware Trash operation."""
     moved = bytes_moved = 0
     errors: list[str] = []
     for item in candidates:
         try:
-            shutil.move(str(item.path), str(unique_trash_path(trash, item.path)))
+            trash_item(item.path)
             moved += 1
             bytes_moved += item.size
         except (OSError, PermissionError) as error:
@@ -309,7 +296,7 @@ def main() -> int:
         changed, bytes_changed, errors = delete_permanently(selected)
         print(f"Permanently deleted {changed} file(s), {human_size(bytes_changed)}.")
     else:
-        changed, bytes_changed, errors = move_to_trash(selected, Path.home() / ".Trash")
+        changed, bytes_changed, errors = move_to_trash(selected)
         print(f"Moved {changed} file(s), {human_size(bytes_changed)}, to Trash. You can restore them from Finder.")
     for error in errors:
         print(f"Warning: {error}", file=sys.stderr)

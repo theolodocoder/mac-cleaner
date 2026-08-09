@@ -6,6 +6,7 @@ import json
 import threading
 from http.client import HTTPConnection
 from pathlib import Path
+from unittest.mock import patch
 
 import mac_cleaner
 import mac_cleaner_gui
@@ -102,6 +103,13 @@ class CleanerTests(unittest.TestCase):
             self.assertEqual((deleted, bytes_deleted, errors), (1, 10, []))
             self.assertFalse(selected_path.exists())
             self.assertTrue(kept_path.exists())
+
+    def test_move_to_trash_uses_native_macos_operation(self):
+        candidate = mac_cleaner.Candidate(Path("installer.dmg"), 42, "downloaded installer", 5)
+        with patch("mac_cleaner.trash_item", return_value=Path("/Trash/installer.dmg")) as native:
+            moved, bytes_moved, errors = mac_cleaner.move_to_trash([candidate])
+        self.assertEqual((moved, bytes_moved, errors), (1, 42, []))
+        native.assert_called_once_with(candidate.path)
 
 
 class GuiServerTests(unittest.TestCase):
