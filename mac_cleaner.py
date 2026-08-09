@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
 import stat as stat_module
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -37,6 +38,75 @@ PROJECT_MARKERS = {
 
 
 @dataclass(frozen=True)
+class Rules:
+    preset: str = "balanced"
+    installer_age: int = 1
+    screenshot_recommended_age: int = 14
+    archive_age: int = 30
+    disk_image_age: int = 14
+    large_file_age: int = 7
+    large_file_bytes: int = 500 * 1024**2
+    exclude_patterns: tuple[str, ...] = ()
+    include_folders: tuple[Path, ...] = ()
+
+
+PRESETS: dict[str, Rules] = {
+    "conservative": Rules("conservative", 7, 30, 90, 60, 30, 1024**3),
+    "balanced": Rules(),
+    "aggressive": Rules("aggressive", 1, 7, 14, 7, 3, 250 * 1024**2),
+}
+
+
+def default_config_path() -> Path:
+    return Path.home() / ".config" / "mac-cleaner" / "config.json"
+
+
+def load_rules(config_path: Path | None = None, preset_override: str | None = None) -> Rules:
+    """Load a preset and optional safe JSON overrides."""
+    path = (config_path or default_config_path()).expanduser()
+    payload: dict[str, object] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"could not load config {path}: {error}") from error
+        if not isinstance(loaded, dict):
+            raise ValueError(f"config must contain a JSON object: {path}")
+        payload = loaded
+
+    preset = preset_override or str(payload.get("preset", "balanced"))
+    if preset not in PRESETS:
+        raise ValueError(f"unknown preset: {preset}")
+    rules = PRESETS[preset]
+    thresholds = payload.get("thresholds", {})
+    if not isinstance(thresholds, dict):
+        raise ValueError("config thresholds must be an object")
+    allowed = {
+        "installer_age", "screenshot_recommended_age", "archive_age",
+        "disk_image_age", "large_file_age", "large_file_bytes",
+    }
+    overrides: dict[str, int] = {}
+    for key, value in thresholds.items():
+        if key not in allowed:
+            raise ValueError(f"unknown threshold: {key}")
+        if not isinstance(value, int) or value < 0:
+            raise ValueError(f"threshold {key} must be a non-negative integer")
+        overrides[key] = value
+    exclude = payload.get("exclude_patterns", [])
+    include = payload.get("include_folders", [])
+    if not isinstance(exclude, list) or not all(isinstance(value, str) for value in exclude):
+        raise ValueError("exclude_patterns must be a list of strings")
+    if not isinstance(include, list) or not all(isinstance(value, str) for value in include):
+        raise ValueError("include_folders must be a list of paths")
+    return replace(
+        rules,
+        **overrides,
+        exclude_patterns=tuple(exclude),
+        include_folders=tuple(Path(value).expanduser() for value in include),
+    )
+
+
+@dataclass(frozen=True)
 class Candidate:
     path: Path
     size: int
@@ -46,6 +116,9 @@ class Candidate:
     device_id: int | None = None
     inode: int | None = None
     modified_ns: int | None = None
+    confidence: int = 0
+    category: str = "Other"
+    signals: tuple[str, ...] = ()
 
     @property
     def recommendation(self) -> str:
@@ -67,30 +140,54 @@ def default_folders() -> list[Path]:
     return [home / name for name in ("Downloads", "Desktop", "Pictures")]
 
 
-def classify(path: Path, stat: os.stat_result, now: float, min_age: int) -> Candidate | None:
+def classify(
+    path: Path, stat: os.stat_result, now: float, min_age: int, rules: Rules | None = None
+) -> Candidate | None:
+    rules = rules or PRESETS["balanced"]
     age_days = max(0, int((now - stat.st_mtime) / 86400))
     suffix = path.suffix.lower()
     reason = ""
 
     important = False
-    if suffix in INSTALLERS and age_days >= 1:
+    confidence = 0
+    category = "Other"
+    signals: list[str] = []
+    if suffix in INSTALLERS and age_days >= rules.installer_age:
         # A downloaded installer is normally disposable once installation is done.
         reason = "downloaded installer"
+        category = "Installers"
+        confidence = 95
         important = stat.st_size >= 2 * 1024**3
+        signals = [f"installer file ({suffix})", f"{age_days} days old"]
     elif suffix in PARTIALS and age_days >= 1:
         reason = "incomplete download"
+        category = "Incomplete downloads"
+        confidence = 99
+        signals = [f"unfinished download ({suffix})", f"{age_days} days old"]
     elif SCREENSHOT_RE.match(path.name):
         reason = "recent screenshot/recording" if age_days < min_age else "old screenshot/recording"
-        important = age_days < max(min_age, 14) or stat.st_size >= 2 * 1024**3
-    elif suffix in ARCHIVES and age_days >= max(min_age, 30):
+        category = "Screenshots" if suffix != ".mov" else "Screen recordings"
+        confidence = 92 if age_days >= rules.screenshot_recommended_age else 45
+        important = confidence < 80 or stat.st_size >= 2 * 1024**3
+        signals = ["recognized macOS capture name", f"{age_days} days old"]
+    elif suffix in ARCHIVES and age_days >= max(min_age, rules.archive_age):
         reason = "old archive"
+        category = "Archives"
+        confidence = 55
         important = True
-    elif suffix in DISK_IMAGES and age_days >= max(min_age, 14):
+        signals = [f"archive file ({suffix})", f"{age_days} days old"]
+    elif suffix in DISK_IMAGES and age_days >= max(min_age, rules.disk_image_age):
         reason = "old disk image"
+        category = "Disk images"
+        confidence = 50
         important = True
-    elif stat.st_size >= 500 * 1024**2 and age_days >= max(min_age, 7):
+        signals = [f"disk image ({suffix})", f"{age_days} days old"]
+    elif stat.st_size >= rules.large_file_bytes and age_days >= max(min_age, rules.large_file_age):
         reason = "large old file"
+        category = "Large files"
+        confidence = 35
         important = True
+        signals = [f"larger than {human_size(rules.large_file_bytes)}", f"{age_days} days old"]
     else:
         return None
 
@@ -103,10 +200,14 @@ def classify(path: Path, stat: os.stat_result, now: float, min_age: int) -> Cand
         device_id=stat.st_dev,
         inode=stat.st_ino,
         modified_ns=stat.st_mtime_ns,
+        confidence=confidence,
+        category=category,
+        signals=tuple(signals),
     )
 
 
-def scan(roots: list[Path], min_age: int) -> tuple[list[Candidate], list[str]]:
+def scan(roots: list[Path], min_age: int, rules: Rules | None = None) -> tuple[list[Candidate], list[str]]:
+    rules = rules or PRESETS["balanced"]
     found: list[Candidate] = []
     warnings: list[str] = []
     now = time.time()
@@ -140,6 +241,9 @@ def scan(roots: list[Path], min_age: int) -> tuple[list[Candidate], list[str]]:
 
         for directory, dirnames, filenames in os.walk(root, topdown=True, onerror=on_error, followlinks=False):
             current = Path(directory)
+            if any(fnmatch.fnmatch(str(current), pattern) for pattern in rules.exclude_patterns):
+                dirnames[:] = []
+                continue
             if any((current / marker).exists() for marker in PROJECT_MARKERS):
                 dirnames[:] = []
                 continue
@@ -158,7 +262,7 @@ def scan(roots: list[Path], min_age: int) -> tuple[list[Candidate], list[str]]:
                     if identity in seen_files:
                         continue
                     seen_files.add(identity)
-                    candidate = classify(path, file_stat, now, min_age)
+                    candidate = classify(path, file_stat, now, min_age, rules)
                     if candidate:
                         found.append(candidate)
                 except (OSError, PermissionError) as error:
@@ -309,8 +413,10 @@ def parse_args() -> argparse.Namespace:
         description="Find common macOS clutter and safely clean selected files."
     )
     parser.add_argument("folders", nargs="*", type=Path, help="folders to scan")
-    parser.add_argument("--min-age", type=int, default=7, metavar="DAYS",
-                        help="minimum age for screenshots and general clutter (default: 7)")
+    parser.add_argument("--min-age", type=int, default=None, metavar="DAYS",
+                        help="minimum age for screenshots and general clutter")
+    parser.add_argument("--preset", choices=tuple(PRESETS), help="cleanup sensitivity preset")
+    parser.add_argument("--config", type=Path, help="path to JSON configuration")
     parser.add_argument("--dry-run", action="store_true", help="scan only; change nothing")
     parser.add_argument("--yes", action="store_true",
                         help="approve normal candidates (flagged items still require review)")
@@ -328,15 +434,22 @@ def main() -> int:
 
         run_gui()
         return 0
-    if args.min_age < 0:
+    if args.min_age is not None and args.min_age < 0:
         print("Error: --min-age cannot be negative.", file=sys.stderr)
         return 2
 
-    roots = args.folders or default_folders()
-    print("Scanning:")
+    try:
+        rules = load_rules(args.config, args.preset)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 2
+    minimum_age = args.min_age if args.min_age is not None else 7
+
+    roots = args.folders or list(rules.include_folders) or default_folders()
+    print(f"Scanning with {rules.preset} preset:")
     for root in roots:
         print(f"  • {root.expanduser()}")
-    candidates, warnings = scan(roots, args.min_age)
+    candidates, warnings = scan(roots, minimum_age, rules)
 
     if not candidates:
         print("\nNo matching clutter found. Nothing was changed.")
@@ -350,7 +463,11 @@ def main() -> int:
     for index, item in enumerate(candidates, 1):
         numbered.append((index, item))
         marker = " ⚠ review" if item.important else ""
-        print(f"{index:>3}. {human_size(item.size):>9}  {item.age_days:>4}d  {item.reason}{marker}\n     {item.path}")
+        print(
+            f"{index:>3}. {human_size(item.size):>9}  {item.age_days:>4}d  "
+            f"{item.category} · {item.confidence}% confidence · {item.reason}{marker}\n"
+            f"     {item.path}\n     Why: {', '.join(item.signals)}"
+        )
 
     if args.dry_run:
         print("\nDry run complete. Nothing was changed.")

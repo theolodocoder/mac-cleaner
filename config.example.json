@@ -1,0 +1,20 @@
+{
+  "preset": "balanced",
+  "include_folders": [
+    "~/Downloads",
+    "~/Desktop",
+    "~/Pictures"
+  ],
+  "exclude_patterns": [
+    "*/Important/*",
+    "*/Client Work/*"
+  ],
+  "thresholds": {
+    "installer_age": 1,
+    "screenshot_recommended_age": 14,
+    "archive_age": 30,
+    "disk_image_age": 14,
+    "large_file_age": 7,
+    "large_file_bytes": 524288000
+  }
+}

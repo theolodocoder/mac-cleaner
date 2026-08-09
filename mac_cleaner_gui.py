@@ -52,7 +52,7 @@ const $=id=>document.getElementById(id);
 let recommended=[],review=[];
 async function api(path,body={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Mac-Cleaner-Token':TOKEN},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed');return data}
 function esc(value){const node=document.createElement('span');node.textContent=value;return node.innerHTML}
-function row(item,checkbox=false){return `<div class="file">${checkbox?`<input class="check review-check" type="checkbox" value="${item.id}">`:'<span class="safe">✓</span>'}<div><div class="file-name">${esc(item.name)}</div><div class="meta">${esc(item.reason)} · ${item.age_days} days old<br>${esc(item.path)}</div></div><div class="size">${esc(item.size)}</div></div>`}
+function row(item,checkbox=false){return `<div class="file">${checkbox?`<input class="check review-check" type="checkbox" value="${item.id}">`:'<span class="safe">✓</span>'}<div><div class="file-name">${esc(item.name)}</div><div class="meta">${esc(item.category)} · ${item.confidence}% confidence · ${esc(item.reason)} · ${item.age_days} days old<br>${esc(item.signals.join(', '))}<br>${esc(item.path)}</div></div><div class="size">${esc(item.size)}</div></div>`}
 function render(){ $('recommended').innerHTML=recommended.length?recommended.map(x=>row(x)).join(''):'<div class="empty">No recommended clutter found</div>';$('review').innerHTML=review.length?review.map(x=>row(x,true)).join(''):'<div class="empty">No protected files found</div>';$('cleanRecommended').disabled=!recommended.length;$('cleanReview').disabled=true;document.querySelectorAll('.review-check').forEach(x=>x.addEventListener('change',()=>{$('cleanReview').disabled=!document.querySelectorAll('.review-check:checked').length})) }
 function toast(text){$('toast').textContent=text;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',4500)}
 async function doScan(){try{$('scan').disabled=true;$('status').textContent='Scanning…';const data=await api('/api/scan',{folders:$('folders').value.split(',').map(x=>x.trim()).filter(Boolean),min_age:Number($('age').value)});recommended=data.recommended;review=data.review;$('summary').textContent=`${recommended.length} recommended · ${review.length} need review · ${data.total_size} found`;$('status').textContent=data.warnings.length?`${data.warnings.length} folder warning(s)`:'Scan complete';render();if(data.warnings.length)toast(data.warnings.join('\n'))}catch(e){toast(e.message);$('status').textContent='Scan failed'}finally{$('scan').disabled=false}}
@@ -84,6 +84,8 @@ def serialize(item: Candidate) -> dict[str, Any]:
         "id": item_id(item), "name": item.path.name, "path": str(item.path),
         "size": human_size(item.size), "age_days": item.age_days,
         "reason": item.reason, "important": item.important,
+        "confidence": item.confidence, "category": item.category,
+        "signals": list(item.signals),
     }
 
 

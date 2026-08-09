@@ -62,6 +62,12 @@ Scan particular folders or change the minimum age:
 python3 mac_cleaner.py ~/Downloads ~/Movies --min-age 14
 ```
 
+Choose a sensitivity preset with `--preset conservative`, `balanced` (default),
+or `aggressive`. Copy `config.example.json` to
+`~/.config/mac-cleaner/config.json` to customize scan folders, exclusions, and
+thresholds. Every result includes a category, confidence percentage, and the
+signals used to classify it.
+
 ## Optional GUI
 
 Open the GUI only when you want it:

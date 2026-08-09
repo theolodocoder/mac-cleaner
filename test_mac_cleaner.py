@@ -49,6 +49,8 @@ class CleanerTests(unittest.TestCase):
             found, _ = mac_cleaner.scan([root], min_age=30)
             self.assertEqual([item.path.name for item in found], ["yesterday.dmg"])
             self.assertFalse(found[0].important)
+            self.assertEqual(found[0].confidence, 95)
+            self.assertEqual(found[0].category, "Installers")
 
     def test_recent_screenshot_is_visible_but_protected(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -166,6 +168,31 @@ class CleanerTests(unittest.TestCase):
             entry = json.loads(journal.read_text())
             self.assertEqual(entry["action"], "trash")
             self.assertEqual(entry["size"], 50)
+
+    def test_loads_preset_and_json_overrides(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "config.json"
+            config.write_text(json.dumps({
+                "preset": "conservative",
+                "thresholds": {"installer_age": 3},
+                "exclude_patterns": ["*/Private/*"],
+                "include_folders": ["~/Downloads"],
+            }))
+            rules = mac_cleaner.load_rules(config)
+            self.assertEqual(rules.preset, "conservative")
+            self.assertEqual(rules.installer_age, 3)
+            self.assertEqual(rules.archive_age, 90)
+            self.assertEqual(rules.exclude_patterns, ("*/Private/*",))
+
+    def test_config_exclusion_pattern_skips_tree(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            excluded = root / "Private"
+            excluded.mkdir()
+            self.make_file(excluded, "installer.dmg", 20)
+            rules = mac_cleaner.Rules(exclude_patterns=("*/Private",))
+            found, _ = mac_cleaner.scan([root], min_age=7, rules=rules)
+            self.assertEqual(found, [])
 
 
 class GuiServerTests(unittest.TestCase):
