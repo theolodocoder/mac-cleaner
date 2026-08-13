@@ -68,9 +68,10 @@ class CleanerTests(unittest.TestCase):
             installer = self.make_file(root, "old-installer.dmg", 20)
             self.make_file(root, "same-a.bin", 20, 1024 * 1024)
             self.make_file(root, "same-b.bin", 20, 1024 * 1024)
+            stats = {}
             with patch("mac_cleaner.icloud_drive_folder", return_value=root), \
                     patch("mac_cleaner.hash_file") as content_hash:
-                found, warnings = mac_cleaner.scan([root], min_age=7)
+                found, warnings = mac_cleaner.scan([root], min_age=7, stats=stats)
             self.assertEqual(warnings, [])
             item = next(candidate for candidate in found if candidate.path == installer.resolve())
             self.assertTrue(item.is_icloud)
@@ -78,7 +79,23 @@ class CleanerTests(unittest.TestCase):
             self.assertTrue(item.trash_only)
             self.assertIsNotNone(item.local_size)
             self.assertIn("deletion syncs to every device", item.signals)
+            self.assertEqual(stats["icloud_files"], 3)
+            self.assertEqual(stats["icloud_candidates_shown"], 3)
+            self.assertEqual(sum(candidate.is_icloud for candidate in found), 3)
             content_hash.assert_not_called()
+
+    def test_icloud_audit_limits_results_but_reports_full_inventory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for index in range(mac_cleaner.ICLOUD_AUDIT_LIMIT + 5):
+                self.make_file(root, f"document-{index}.txt", index, index + 1)
+            stats = {}
+            with patch("mac_cleaner.icloud_drive_folder", return_value=root):
+                found, _ = mac_cleaner.scan([root], min_age=7, stats=stats)
+            self.assertEqual(stats["icloud_files"], mac_cleaner.ICLOUD_AUDIT_LIMIT + 5)
+            self.assertEqual(stats["icloud_candidates_shown"], mac_cleaner.ICLOUD_AUDIT_LIMIT)
+            self.assertEqual(len(found), mac_cleaner.ICLOUD_AUDIT_LIMIT)
+            self.assertGreaterEqual(found[0].size, found[-1].size)
 
     def test_skips_project_trees(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -326,6 +343,10 @@ class CleanerTests(unittest.TestCase):
             self.assertEqual(payload["candidate_count"], 1)
             self.assertEqual(payload["total_bytes"], 50)
             self.assertEqual(payload["warnings"], ["warning"])
+            mac_cleaner.write_scan_report(
+                report, [item], [], "balanced", {"icloud_files": 12}
+            )
+            self.assertEqual(json.loads(report.read_text())["scan_stats"]["icloud_files"], 12)
             mac_cleaner.update_cleanup_report(report, "trash", 1, 50, [])
             payload = json.loads(report.read_text())
             self.assertEqual(payload["cleanup"]["bytes_reclaimed"], 50)
@@ -419,6 +440,31 @@ class GuiServerTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 results = json.loads(response.read())
                 self.assertGreaterEqual(results["recommended"][0]["confidence"], 88)
+
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                normal = root / "normal"
+                cloud_root = root / "cloud"
+                normal.mkdir()
+                cloud_root.mkdir()
+                (cloud_root / "ordinary-document.txt").write_bytes(b"cloud document")
+                body = json.dumps({
+                    "folders": [str(normal)], "min_age": 7,
+                    "preset": "balanced", "duplicates": True,
+                    "icloud_drive": True,
+                })
+                with patch("mac_cleaner_gui.icloud_drive_folder", return_value=cloud_root), \
+                        patch("mac_cleaner.icloud_drive_folder", return_value=cloud_root):
+                    connection.request("POST", "/api/scan", body=body, headers={
+                        "Content-Type": "application/json",
+                        "X-Mac-Cleaner-Token": "test-token",
+                    })
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    results = json.loads(response.read())
+                self.assertEqual(results["icloud_files"], 1)
+                self.assertEqual(results["icloud_candidates_shown"], 1)
+                self.assertTrue(results["review"][0]["is_icloud"])
 
             connection.request("GET", "/api/progress", headers={
                 "X-Mac-Cleaner-Token": "test-token"

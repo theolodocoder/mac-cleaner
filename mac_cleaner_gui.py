@@ -66,7 +66,7 @@ function render(){const shownRecommended=visible(recommended),shownReview=visibl
 function toast(text){$('toast').textContent=text;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',4500)}
 let progressTimer=null;
 async function updateProgress(){try{const data=await getApi('/api/progress');if(data.active)$('status').textContent=`Scanning ${data.inspected} files… ${data.folder}` }catch(e){}}
-async function doScan(){try{$('scan').disabled=true;$('cancel').disabled=false;$('status').textContent='Scanning…';progressTimer=setInterval(updateProgress,500);const data=await api('/api/scan',{folders:$('folders').value.split(',').map(x=>x.trim()).filter(Boolean),min_age:Number($('age').value),preset:$('preset').value,duplicates:$('duplicates').checked,empty_folders:$('emptyFolders').checked,developer_caches:$('developerCaches').checked,iphone_backups:$('iphoneBackups').checked,icloud_drive:$('icloudDrive').checked});recommended=data.recommended;review=data.review;const cloud=data.icloud_count?` · ${data.icloud_count} iCloud`:'';$('summary').textContent=`${recommended.length} recommended · ${review.length} need review${cloud} · ${data.total_size} found`;$('status').textContent=data.warnings.length?`${data.warnings.length} warning(s)`:'Scan complete';render();if(data.warnings.length)toast(data.warnings.join('\n'))}catch(e){toast(e.message);$('status').textContent='Scan failed'}finally{clearInterval(progressTimer);$('scan').disabled=false;$('cancel').disabled=true}}
+async function doScan(){try{$('scan').disabled=true;$('cancel').disabled=false;$('status').textContent='Scanning…';progressTimer=setInterval(updateProgress,500);const data=await api('/api/scan',{folders:$('folders').value.split(',').map(x=>x.trim()).filter(Boolean),min_age:Number($('age').value),preset:$('preset').value,duplicates:$('duplicates').checked,empty_folders:$('emptyFolders').checked,developer_caches:$('developerCaches').checked,iphone_backups:$('iphoneBackups').checked,icloud_drive:$('icloudDrive').checked});recommended=data.recommended;review=data.review;const cloud=data.icloud_files?` · ${data.icloud_files} iCloud files (${data.icloud_logical_size})`:'';$('summary').textContent=`${recommended.length} recommended · ${review.length} need review${cloud} · ${data.total_size} candidates`;$('status').textContent=data.warnings.length?`${data.warnings.length} warning(s)`:'Scan complete';render();if(data.warnings.length)toast(data.warnings.join('\n'))}catch(e){toast(e.message);$('status').textContent='Scan failed'}finally{clearInterval(progressTimer);$('scan').disabled=false;$('cancel').disabled=true}}
 $('scan').onclick=doScan;
 $('cancel').onclick=()=>api('/api/cancel');
 $('search').oninput=render;$('sort').onchange=render;
@@ -224,8 +224,10 @@ class CleanerHandler(BaseHTTPRequestHandler):
             scan_roots = folders or default_folders()
             if bool(data.get("icloud_drive", False)):
                 scan_roots = [*scan_roots, icloud_drive_folder()]
+            scan_stats: dict[str, int] = {}
             candidates, warnings = scan(
-                scan_roots, minimum_age, rules, progress, self.server.cancel_event
+                scan_roots, minimum_age, rules, progress, self.server.cancel_event,
+                scan_stats,
             )
             if not self.server.cancel_event.is_set():
                 candidates.extend(special_storage_candidates(
@@ -244,6 +246,10 @@ class CleanerHandler(BaseHTTPRequestHandler):
             "total_size": human_size(sum(item.size for item in candidates)),
             "icloud_count": sum(item.is_icloud for item in candidates),
             "icloud_size": human_size(sum(item.size for item in candidates if item.is_icloud)),
+            "icloud_files": scan_stats.get("icloud_files", 0),
+            "icloud_logical_size": human_size(scan_stats.get("icloud_logical_bytes", 0)),
+            "icloud_local_size": human_size(scan_stats.get("icloud_local_bytes", 0)),
+            "icloud_candidates_shown": scan_stats.get("icloud_candidates_shown", 0),
             "warnings": warnings,
         })
 

@@ -39,6 +39,7 @@ PROJECT_MARKERS = {
     ".git", ".svn", ".hg", "package.json", "pyproject.toml", "Cargo.toml",
     "go.mod", "composer.json", "Podfile", "Gemfile",
 }
+ICLOUD_AUDIT_LIMIT = 100
 
 
 @dataclass(frozen=True)
@@ -275,6 +276,7 @@ def scan(
     roots: list[Path], min_age: int, rules: Rules | None = None,
     progress: Callable[[int, Path], None] | None = None,
     cancel_event: Event | None = None,
+    stats: dict[str, int] | None = None,
 ) -> tuple[list[Candidate], list[str]]:
     rules = rules or PRESETS["balanced"]
     found: list[Candidate] = []
@@ -282,6 +284,7 @@ def scan(
     now = time.time()
     seen_files: set[tuple[int, int]] = set()
     duplicate_pool: dict[int, list[tuple[Path, os.stat_result]]] = {}
+    icloud_inventory: list[tuple[Path, os.stat_result]] = []
     empty_folders: list[tuple[Path, os.stat_result, bool]] = []
     inspected = 0
     cancelled = False
@@ -322,12 +325,13 @@ def scan(
             if any(fnmatch.fnmatch(str(current), pattern) for pattern in rules.exclude_patterns):
                 dirnames[:] = []
                 continue
-            if any((current / marker).exists() for marker in PROJECT_MARKERS):
+            if (not directory_in_icloud
+                    and any((current / marker).exists() for marker in PROJECT_MARKERS)):
                 dirnames[:] = []
                 continue
             dirnames[:] = [
                 name for name in dirnames
-                if name not in SKIP_DIRS and not name.startswith(".")
+                if (directory_in_icloud or name not in SKIP_DIRS) and not name.startswith(".")
                 and not (Path(directory) / name).is_symlink()
             ]
             for filename in filenames:
@@ -343,6 +347,16 @@ def scan(
                     if identity in seen_files:
                         continue
                     seen_files.add(identity)
+                    if directory_in_icloud:
+                        icloud_inventory.append((path, file_stat))
+                        if stats is not None:
+                            stats["icloud_files"] = stats.get("icloud_files", 0) + 1
+                            stats["icloud_logical_bytes"] = (
+                                stats.get("icloud_logical_bytes", 0) + file_stat.st_size
+                            )
+                            stats["icloud_local_bytes"] = (
+                                stats.get("icloud_local_bytes", 0) + allocated_size(file_stat)
+                            )
                     # Reading file contents can download evicted iCloud placeholders.
                     if (rules.detect_duplicates and not directory_in_icloud
                             and file_stat.st_size >= rules.duplicate_min_bytes):
@@ -413,6 +427,38 @@ def scan(
             signals=("contains no files or folders",), kind="directory", stat_size=folder_stat.st_size,
         )
         found.append(protect_icloud_candidate(candidate, folder_stat) if is_icloud else candidate)
+
+    existing_paths = {item.path for item in found}
+    existing_icloud = sum(item.is_icloud for item in found)
+    slots = max(0, ICLOUD_AUDIT_LIMIT - existing_icloud)
+    for path, file_stat in sorted(
+        icloud_inventory, key=lambda pair: pair[1].st_size, reverse=True
+    ):
+        if slots == 0:
+            break
+        if path in existing_paths or file_stat.st_size == 0:
+            continue
+        age_days = max(0, int((now - file_stat.st_mtime) / 86400))
+        if file_stat.st_size >= 100 * 1024**2:
+            reason, confidence = "large iCloud Drive file", 40
+        elif age_days >= 365:
+            reason, confidence = "old iCloud Drive file", 30
+        else:
+            reason, confidence = "iCloud Drive storage item", 20
+        candidate = Candidate(
+            path=path, size=file_stat.st_size, reason=reason, age_days=age_days,
+            important=True, device_id=file_stat.st_dev, inode=file_stat.st_ino,
+            modified_ns=file_stat.st_mtime_ns, confidence=confidence,
+            category="iCloud storage",
+            signals=("ranked by logical iCloud size", f"{age_days} days old"),
+            stat_size=file_stat.st_size,
+        )
+        found.append(protect_icloud_candidate(candidate, file_stat))
+        existing_paths.add(path)
+        slots -= 1
+
+    if stats is not None:
+        stats["icloud_candidates_shown"] = sum(item.is_icloud for item in found)
 
     found = mark_older_installer_versions(found)
     found.sort(key=lambda item: item.size, reverse=True)
@@ -663,11 +709,15 @@ def candidate_dict(item: Candidate) -> dict[str, object]:
     }
 
 
-def write_scan_report(path: Path, candidates: list[Candidate], warnings: list[str], preset: str) -> None:
+def write_scan_report(
+    path: Path, candidates: list[Candidate], warnings: list[str], preset: str,
+    stats: dict[str, int] | None = None,
+) -> None:
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(), "preset": preset,
         "candidate_count": len(candidates), "total_bytes": sum(item.size for item in candidates),
         "warnings": warnings, "candidates": [candidate_dict(item) for item in candidates],
+        "scan_stats": stats or {},
     }
     target = path.expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -849,12 +899,13 @@ def main() -> int:
     print(f"Scanning with {rules.preset} preset:")
     for root in roots:
         print(f"  • {root.expanduser()}")
-    candidates, warnings = scan(roots, minimum_age, rules)
+    scan_stats: dict[str, int] = {}
+    candidates, warnings = scan(roots, minimum_age, rules, stats=scan_stats)
     candidates.extend(special_storage_candidates(args.developer_caches, args.iphone_backups))
     candidates.sort(key=lambda item: item.size, reverse=True)
     if args.report:
         try:
-            write_scan_report(args.report, candidates, warnings, rules.preset)
+            write_scan_report(args.report, candidates, warnings, rules.preset, scan_stats)
             print(f"Report written to {args.report.expanduser()}")
         except OSError as error:
             print(f"Warning: could not write report: {error}", file=sys.stderr)
@@ -868,6 +919,14 @@ def main() -> int:
         return 0
 
     print(f"\nFound {len(candidates)} candidate(s), {human_size(sum(x.size for x in candidates))} total:\n")
+    if scan_stats.get("icloud_files", 0):
+        print(
+            "iCloud Drive audit: "
+            f"{scan_stats['icloud_files']} file(s), "
+            f"{human_size(scan_stats.get('icloud_logical_bytes', 0))} logical storage, "
+            f"{human_size(scan_stats.get('icloud_local_bytes', 0))} currently on this Mac; "
+            f"showing {scan_stats.get('icloud_candidates_shown', 0)} protected item(s).\n"
+        )
     selected: list[Candidate] = []
     numbered: list[tuple[int, Candidate]] = []
     for index, item in enumerate(candidates, 1):

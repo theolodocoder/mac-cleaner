@@ -112,8 +112,10 @@ account. Finder/iCloud normally keeps deleted Drive files recoverable for up to
 30 days, but Mac Cleaner never treats that as a substitute for a backup.
 
 The audit uses filesystem metadata and does not hash iCloud files, avoiding
-content reads that could download cloud-only placeholders. Results show the
-logical iCloud size and an estimate of the bytes currently allocated on the Mac.
+content reads that could download cloud-only placeholders. It reports the full
+file count, logical iCloud size, and estimated bytes currently allocated on the
+Mac, then presents up to the 100 largest files as protected review items. This
+includes ordinary documents that do not match the normal clutter rules.
 The same audit is available as the optional **iCloud Drive audit** toggle under
 Advanced detectors in the GUI.
 
