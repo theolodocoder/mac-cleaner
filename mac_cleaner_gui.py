@@ -16,8 +16,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from mac_cleaner import (
-    Candidate, default_folders, delete_permanently, load_rules, move_to_trash,
-    partition_candidates, read_history, scan, special_storage_candidates,
+    Candidate, default_folders, delete_permanently, icloud_drive_folder, load_rules,
+    move_to_trash, partition_candidates, read_history, scan, special_storage_candidates,
 )
 
 
@@ -43,7 +43,7 @@ HTML = r"""<!doctype html>
   <button class="button primary" id="scan">Scan now</button>
   <button class="button" id="cancel" disabled>Cancel</button>
 </section>
-<details class="advanced"><summary>Advanced detectors</summary><p><label><input type="checkbox" id="duplicates" checked> Exact duplicates</label><label><input type="checkbox" id="emptyFolders"> Empty folders</label><label><input type="checkbox" id="developerCaches"> Developer caches</label><label><input type="checkbox" id="iphoneBackups"> iPhone backups</label></p></details>
+<details class="advanced"><summary>Advanced detectors</summary><p><label><input type="checkbox" id="duplicates" checked> Exact duplicates</label><label><input type="checkbox" id="emptyFolders"> Empty folders</label><label><input type="checkbox" id="developerCaches"> Developer caches</label><label><input type="checkbox" id="iphoneBackups"> iPhone backups</label><label><input type="checkbox" id="icloudDrive"> iCloud Drive audit</label></p><p class="meta">iCloud results are always protected and Trash-only. Removing one also removes it from every synced device.</p></details>
 <section class="summary"><strong id="summary">Ready to scan</strong><span class="status" id="status">Local and private</span></section>
 <section class="filters"><input id="search" placeholder="Filter by name, path, category…"><select id="sort"><option value="size">Largest first</option><option value="confidence">Highest confidence</option><option value="age">Oldest first</option><option value="name">Name</option></select></section>
 <div class="grid">
@@ -60,18 +60,18 @@ let recommended=[],review=[];
 async function api(path,body={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Mac-Cleaner-Token':TOKEN},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed');return data}
 async function getApi(path){const response=await fetch(path,{headers:{'X-Mac-Cleaner-Token':TOKEN}});const data=await response.json();if(!response.ok)throw new Error(data.error||'Request failed');return data}
 function esc(value){const node=document.createElement('span');node.textContent=value;return node.innerHTML}
-function row(item,checkbox=false){return `<div class="file">${checkbox?`<input class="check review-check" type="checkbox" value="${item.id}">`:'<span class="safe">✓</span>'}<div><div class="file-name">${esc(item.name)}</div><div class="meta">${esc(item.category)} · ${item.confidence}% confidence · ${esc(item.reason)} · ${item.age_days} days old<br>${esc(item.signals.join(', '))}<br>${esc(item.path)}</div><button class="button preview" onclick="quicklook('${item.id}')">Quick Look</button></div><div class="size">${esc(item.size)}</div></div>`}
+function row(item,checkbox=false){const cloud=item.is_icloud?'☁ iCloud · ':'';const local=item.is_icloud&&item.local_size!==null?` · ${esc(item.local_size)} on this Mac`:'';return `<div class="file">${checkbox?`<input class="check review-check" type="checkbox" value="${item.id}">`:'<span class="safe">✓</span>'}<div><div class="file-name">${cloud}${esc(item.name)}</div><div class="meta">${esc(item.category)} · ${item.confidence}% confidence · ${esc(item.reason)} · ${item.age_days} days old<br>${esc(item.signals.join(', '))}<br>${esc(item.path)}</div><button class="button preview" onclick="quicklook('${item.id}')">Quick Look</button></div><div class="size">${esc(item.size)}${local}</div></div>`}
 function visible(items){const query=$('search').value.trim().toLowerCase();const result=items.filter(x=>!query||`${x.name} ${x.path} ${x.category} ${x.reason}`.toLowerCase().includes(query));const mode=$('sort').value;result.sort((a,b)=>mode==='confidence'?b.confidence-a.confidence:mode==='age'?b.age_days-a.age_days:mode==='name'?a.name.localeCompare(b.name):b.bytes-a.bytes);return result}
 function render(){const shownRecommended=visible(recommended),shownReview=visible(review);$('recommended').innerHTML=shownRecommended.length?shownRecommended.map(x=>row(x)).join(''):'<div class="empty">No matching recommended clutter</div>';$('review').innerHTML=shownReview.length?shownReview.map(x=>row(x,true)).join(''):'<div class="empty">No matching protected files</div>';$('cleanRecommended').disabled=!recommended.length;$('cleanReview').disabled=true;document.querySelectorAll('.review-check').forEach(x=>x.addEventListener('change',()=>{$('cleanReview').disabled=!document.querySelectorAll('.review-check:checked').length}))}
 function toast(text){$('toast').textContent=text;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',4500)}
 let progressTimer=null;
 async function updateProgress(){try{const data=await getApi('/api/progress');if(data.active)$('status').textContent=`Scanning ${data.inspected} files… ${data.folder}` }catch(e){}}
-async function doScan(){try{$('scan').disabled=true;$('cancel').disabled=false;$('status').textContent='Scanning…';progressTimer=setInterval(updateProgress,500);const data=await api('/api/scan',{folders:$('folders').value.split(',').map(x=>x.trim()).filter(Boolean),min_age:Number($('age').value),preset:$('preset').value,duplicates:$('duplicates').checked,empty_folders:$('emptyFolders').checked,developer_caches:$('developerCaches').checked,iphone_backups:$('iphoneBackups').checked});recommended=data.recommended;review=data.review;$('summary').textContent=`${recommended.length} recommended · ${review.length} need review · ${data.total_size} found`;$('status').textContent=data.warnings.length?`${data.warnings.length} warning(s)`:'Scan complete';render();if(data.warnings.length)toast(data.warnings.join('\n'))}catch(e){toast(e.message);$('status').textContent='Scan failed'}finally{clearInterval(progressTimer);$('scan').disabled=false;$('cancel').disabled=true}}
+async function doScan(){try{$('scan').disabled=true;$('cancel').disabled=false;$('status').textContent='Scanning…';progressTimer=setInterval(updateProgress,500);const data=await api('/api/scan',{folders:$('folders').value.split(',').map(x=>x.trim()).filter(Boolean),min_age:Number($('age').value),preset:$('preset').value,duplicates:$('duplicates').checked,empty_folders:$('emptyFolders').checked,developer_caches:$('developerCaches').checked,iphone_backups:$('iphoneBackups').checked,icloud_drive:$('icloudDrive').checked});recommended=data.recommended;review=data.review;const cloud=data.icloud_count?` · ${data.icloud_count} iCloud`:'';$('summary').textContent=`${recommended.length} recommended · ${review.length} need review${cloud} · ${data.total_size} found`;$('status').textContent=data.warnings.length?`${data.warnings.length} warning(s)`:'Scan complete';render();if(data.warnings.length)toast(data.warnings.join('\n'))}catch(e){toast(e.message);$('status').textContent='Scan failed'}finally{clearInterval(progressTimer);$('scan').disabled=false;$('cancel').disabled=true}}
 $('scan').onclick=doScan;
 $('cancel').onclick=()=>api('/api/cancel');
 $('search').oninput=render;$('sort').onchange=render;
 async function quicklook(id){try{await api('/api/quicklook',{id})}catch(e){toast(e.message)}}
-async function clean(ids,containsReview){const permanent=$('permanent').checked;let permanentConfirmation='';if(permanent){permanentConfirmation=prompt(`Permanent deletion cannot be undone.\n\nType DELETE to permanently delete ${ids.length} selected file(s):`)||'';if(permanentConfirmation!=='DELETE')return}else if(containsReview){const chosen=review.filter(x=>ids.includes(x.id));if(!confirm(`These ${chosen.length} protected file(s) are recent or very large. Move them to Trash?\n\n${chosen.slice(0,8).map(x=>'• '+x.name).join('\n')}`))return}try{$('status').textContent=permanent?'Deleting permanently…':'Moving to Trash…';const data=await api('/api/clean',{ids,confirm_review:containsReview,permanent,confirm_permanent:permanentConfirmation});toast(`${data.action} ${data.changed} file(s), ${data.size}`);await doScan();await loadHistory()}catch(e){toast(e.message)}}
+async function clean(ids,containsReview){const permanent=$('permanent').checked;const chosen=[...recommended,...review].filter(x=>ids.includes(x.id));const cloud=chosen.filter(x=>x.is_icloud);let permanentConfirmation='',icloudConfirmation='';if(permanent&&cloud.length){toast('iCloud Drive items are Trash-only; turn off permanent deletion.');return}if(permanent){permanentConfirmation=prompt(`Permanent deletion cannot be undone.\n\nType DELETE to permanently delete ${ids.length} selected file(s):`)||'';if(permanentConfirmation!=='DELETE')return}else if(containsReview){if(!confirm(`These ${chosen.length} protected file(s) are recent, large, or cloud-synced. Move them to Trash?\n\n${chosen.slice(0,8).map(x=>'• '+x.name).join('\n')}`))return}if(cloud.length){icloudConfirmation=prompt(`CAUTION: removing ${cloud.length} iCloud Drive item(s) removes them from every synced device.\n\nType ICLOUD to continue:`)||'';if(icloudConfirmation!=='ICLOUD')return}try{$('status').textContent=permanent?'Deleting permanently…':'Moving to Trash…';const data=await api('/api/clean',{ids,confirm_review:containsReview,permanent,confirm_permanent:permanentConfirmation,confirm_icloud:icloudConfirmation});toast(`${data.action} ${data.changed} file(s), ${data.size}`);await doScan();await loadHistory()}catch(e){toast(e.message)}}
 $('cleanRecommended').onclick=()=>clean(recommended.map(x=>x.id),false);
 $('cleanReview').onclick=()=>clean([...document.querySelectorAll('.review-check:checked')].map(x=>x.value),true);
 $('quit').onclick=async()=>{await api('/api/shutdown');document.body.innerHTML='<main class="shell"><h1>Mac Cleaner stopped</h1><p class="lead">You can close this tab.</p></main>'};
@@ -102,6 +102,8 @@ def serialize(item: Candidate) -> dict[str, Any]:
         "confidence": item.confidence, "category": item.category,
         "signals": list(item.signals),
         "kind": item.kind, "trash_only": item.trash_only,
+        "is_icloud": item.is_icloud,
+        "local_size": human_size(item.local_size) if item.local_size is not None else None,
         "bytes": item.size,
     }
 
@@ -156,7 +158,11 @@ class CleanerHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif parsed.path == "/api/config":
-            self._json(200, {"folders": [str(path) for path in default_folders()]})
+            self._json(200, {
+                "folders": [str(path) for path in default_folders()],
+                "icloud_drive": str(icloud_drive_folder()),
+                "icloud_available": icloud_drive_folder().is_dir(),
+            })
         elif parsed.path == "/api/progress":
             with self.server.lock:
                 self._json(200, dict(self.server.progress))
@@ -215,8 +221,11 @@ class CleanerHandler(BaseHTTPRequestHandler):
                 }
 
         try:
+            scan_roots = folders or default_folders()
+            if bool(data.get("icloud_drive", False)):
+                scan_roots = [*scan_roots, icloud_drive_folder()]
             candidates, warnings = scan(
-                folders or default_folders(), minimum_age, rules, progress, self.server.cancel_event
+                scan_roots, minimum_age, rules, progress, self.server.cancel_event
             )
             if not self.server.cancel_event.is_set():
                 candidates.extend(special_storage_candidates(
@@ -233,6 +242,8 @@ class CleanerHandler(BaseHTTPRequestHandler):
             "recommended": [serialize(item) for item in recommended],
             "review": [serialize(item) for item in review],
             "total_size": human_size(sum(item.size for item in candidates)),
+            "icloud_count": sum(item.is_icloud for item in candidates),
+            "icloud_size": human_size(sum(item.size for item in candidates if item.is_icloud)),
             "warnings": warnings,
         })
 
@@ -259,8 +270,12 @@ class CleanerHandler(BaseHTTPRequestHandler):
         if any(item.important for item in selected) and data.get("confirm_review") is not True:
             raise ValueError("Protected files require explicit confirmation")
         permanent = data.get("permanent") is True
+        if permanent and any(item.is_icloud for item in selected):
+            raise ValueError("iCloud Drive items cannot be permanently deleted; use Trash")
         if permanent and data.get("confirm_permanent") != "DELETE":
             raise ValueError("Permanent deletion requires typing DELETE")
+        if any(item.is_icloud for item in selected) and data.get("confirm_icloud") != "ICLOUD":
+            raise ValueError("iCloud Drive cleanup requires typing ICLOUD")
         if permanent:
             changed, bytes_changed, errors = delete_permanently(selected)
             action = "Permanently deleted"

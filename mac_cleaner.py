@@ -141,6 +141,8 @@ class Candidate:
     kind: str = "file"
     stat_size: int | None = None
     trash_only: bool = False
+    is_icloud: bool = False
+    local_size: int | None = None
 
     @property
     def recommendation(self) -> str:
@@ -160,6 +162,42 @@ def human_size(size: int) -> str:
 def default_folders() -> list[Path]:
     home = Path.home()
     return [home / name for name in ("Downloads", "Desktop", "Pictures")]
+
+
+def icloud_drive_folder(home: Path | None = None) -> Path:
+    """Return Finder's local iCloud Drive coordination directory."""
+    return (home or Path.home()) / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
+
+
+def is_icloud_drive_path(path: Path, root: Path | None = None) -> bool:
+    """Return whether a path is inside the user's Finder-visible iCloud Drive."""
+    cloud_root = (root or icloud_drive_folder()).expanduser().resolve(strict=False)
+    resolved = path.expanduser().resolve(strict=False)
+    return resolved == cloud_root or cloud_root in resolved.parents
+
+
+def allocated_size(file_stat: os.stat_result) -> int:
+    """Estimate bytes currently allocated on this Mac without reading file data."""
+    blocks = getattr(file_stat, "st_blocks", None)
+    if blocks is None:
+        return file_stat.st_size
+    return min(file_stat.st_size, blocks * 512)
+
+
+def protect_icloud_candidate(item: Candidate, file_stat: os.stat_result) -> Candidate:
+    """Apply the cross-device safety policy to an iCloud Drive candidate."""
+    return replace(
+        item,
+        important=True,
+        trash_only=True,
+        is_icloud=True,
+        local_size=allocated_size(file_stat),
+        signals=item.signals + (
+            "stored in iCloud Drive",
+            "deletion syncs to every device",
+            "permanent deletion disabled",
+        ),
+    )
 
 
 def classify(
@@ -244,7 +282,7 @@ def scan(
     now = time.time()
     seen_files: set[tuple[int, int]] = set()
     duplicate_pool: dict[int, list[tuple[Path, os.stat_result]]] = {}
-    empty_folders: list[tuple[Path, os.stat_result]] = []
+    empty_folders: list[tuple[Path, os.stat_result, bool]] = []
     inspected = 0
     cancelled = False
 
@@ -270,6 +308,7 @@ def scan(
         if root == Path("/") or root == Path.home().resolve():
             warnings.append(f"Refused broad scan target: {root}")
             continue
+        scanning_icloud = is_icloud_drive_path(root)
 
         def on_error(error: OSError) -> None:
             warnings.append(f"Could not read {error.filename}: {error.strerror}")
@@ -279,6 +318,7 @@ def scan(
                 cancelled = True
                 break
             current = Path(directory)
+            directory_in_icloud = scanning_icloud or is_icloud_drive_path(current)
             if any(fnmatch.fnmatch(str(current), pattern) for pattern in rules.exclude_patterns):
                 dirnames[:] = []
                 continue
@@ -303,10 +343,14 @@ def scan(
                     if identity in seen_files:
                         continue
                     seen_files.add(identity)
-                    if rules.detect_duplicates and file_stat.st_size >= rules.duplicate_min_bytes:
+                    # Reading file contents can download evicted iCloud placeholders.
+                    if (rules.detect_duplicates and not directory_in_icloud
+                            and file_stat.st_size >= rules.duplicate_min_bytes):
                         duplicate_pool.setdefault(file_stat.st_size, []).append((path, file_stat))
                     candidate = classify(path, file_stat, now, min_age, rules)
                     if candidate:
+                        if directory_in_icloud:
+                            candidate = protect_icloud_candidate(candidate, file_stat)
                         found.append(candidate)
                     inspected += 1
                     if progress and (inspected == 1 or inspected % 250 == 0):
@@ -317,7 +361,7 @@ def scan(
             if rules.detect_empty_folders and not dirnames and not filenames:
                 try:
                     if not any(current.iterdir()):
-                        empty_folders.append((current, current.stat()))
+                        empty_folders.append((current, current.stat(), directory_in_icloud))
                 except OSError as error:
                     warnings.append(f"Could not inspect empty folder {current}: {error}")
         if cancelled:
@@ -361,13 +405,14 @@ def scan(
                 ))
                 existing_paths.add(path)
 
-    for path, folder_stat in empty_folders:
-        found.append(Candidate(
+    for path, folder_stat, is_icloud in empty_folders:
+        candidate = Candidate(
             path=path, size=0, reason="empty folder", age_days=max(0, int((now - folder_stat.st_mtime) / 86400)),
             important=False, device_id=folder_stat.st_dev, inode=folder_stat.st_ino,
             modified_ns=folder_stat.st_mtime_ns, confidence=98, category="Empty folders",
             signals=("contains no files or folders",), kind="directory", stat_size=folder_stat.st_size,
-        ))
+        )
+        found.append(protect_icloud_candidate(candidate, folder_stat) if is_icloud else candidate)
 
     found = mark_older_installer_versions(found)
     found.sort(key=lambda item: item.size, reverse=True)
@@ -583,6 +628,7 @@ def record_cleanup(item: Candidate, action: str, destination: Path | None = None
         "kind": item.kind,
         "category": item.category,
         "confidence": item.confidence,
+        "is_icloud": item.is_icloud,
     }
     target = history_path()
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -613,6 +659,7 @@ def candidate_dict(item: Candidate) -> dict[str, object]:
         "path": str(item.path), "size": item.size, "age_days": item.age_days,
         "reason": item.reason, "category": item.category, "confidence": item.confidence,
         "recommendation": item.recommendation, "signals": list(item.signals), "kind": item.kind,
+        "is_icloud": item.is_icloud, "local_bytes": item.local_size,
     }
 
 
@@ -673,9 +720,9 @@ def delete_permanently(candidates: list[Candidate]) -> tuple[int, int, list[str]
     for item in candidates:
         try:
             verify_candidate_unchanged(item)
+            if item.trash_only:
+                raise OSError("this item is protected and can only be moved to Trash")
             if item.kind == "directory":
-                if item.trash_only:
-                    raise OSError("this directory is protected and can only be moved to Trash")
                 item.path.rmdir()
             else:
                 item.path.unlink()
@@ -736,6 +783,8 @@ def parse_args() -> argparse.Namespace:
                         help="review known developer cache directories")
     parser.add_argument("--iphone-backups", action="store_true",
                         help="review local iPhone backup directories")
+    parser.add_argument("--icloud-drive", action="store_true",
+                        help="include a protected audit of Finder's iCloud Drive")
     parser.add_argument("--report", type=Path, help="write scan results as a JSON report")
     parser.add_argument("--history", action="store_true", help="show recent cleanup history and exit")
     parser.add_argument("--install-schedule", choices=("daily", "weekly"),
@@ -795,6 +844,8 @@ def main() -> int:
     minimum_age = args.min_age if args.min_age is not None else 7
 
     roots = args.folders or list(rules.include_folders) or default_folders()
+    if args.icloud_drive:
+        roots = [*roots, icloud_drive_folder()]
     print(f"Scanning with {rules.preset} preset:")
     for root in roots:
         print(f"  • {root.expanduser()}")
@@ -822,10 +873,15 @@ def main() -> int:
     for index, item in enumerate(candidates, 1):
         numbered.append((index, item))
         marker = " ⚠ review" if item.important else ""
+        cloud = "☁ iCloud · " if item.is_icloud else ""
+        local = (
+            f"; {human_size(item.local_size)} currently on this Mac"
+            if item.is_icloud and item.local_size is not None else ""
+        )
         print(
             f"{index:>3}. {human_size(item.size):>9}  {item.age_days:>4}d  "
-            f"{item.category} · {item.confidence}% confidence · {item.reason}{marker}\n"
-            f"     {item.path}\n     Why: {', '.join(item.signals)}"
+            f"{cloud}{item.category} · {item.confidence}% confidence · {item.reason}{marker}\n"
+            f"     {item.path}\n     Why: {', '.join(item.signals)}{local}"
         )
 
     if args.dry_run:
@@ -854,6 +910,19 @@ def main() -> int:
             print(f"  • {item.path} ({human_size(item.size)}, {item.reason})")
         if not ask_yes_no(f"Move these {len(protected_selected)} protected file(s) to Trash?"):
             selected = [item for item in selected if not item.important]
+
+    icloud_selected = [item for item in selected if item.is_icloud]
+    if icloud_selected:
+        if args.permanent:
+            print("Error: iCloud Drive items cannot be permanently deleted by Mac Cleaner.", file=sys.stderr)
+            print("Rerun without --permanent to move them to Recently Deleted instead.", file=sys.stderr)
+            return 2
+        print(
+            f"\nCAUTION: deleting {len(icloud_selected)} iCloud Drive item(s) "
+            "removes them from every synced device."
+        )
+        if input("Type ICLOUD to confirm: ").strip() != "ICLOUD":
+            selected = [item for item in selected if not item.is_icloud]
 
     if not selected:
         print("Nothing selected. No files were changed.")

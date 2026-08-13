@@ -62,6 +62,24 @@ class CleanerTests(unittest.TestCase):
             self.assertEqual(found[0].reason, "recent screenshot/recording")
             self.assertTrue(found[0].important)
 
+    def test_icloud_drive_items_are_protected_without_content_hashing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            installer = self.make_file(root, "old-installer.dmg", 20)
+            self.make_file(root, "same-a.bin", 20, 1024 * 1024)
+            self.make_file(root, "same-b.bin", 20, 1024 * 1024)
+            with patch("mac_cleaner.icloud_drive_folder", return_value=root), \
+                    patch("mac_cleaner.hash_file") as content_hash:
+                found, warnings = mac_cleaner.scan([root], min_age=7)
+            self.assertEqual(warnings, [])
+            item = next(candidate for candidate in found if candidate.path == installer.resolve())
+            self.assertTrue(item.is_icloud)
+            self.assertTrue(item.important)
+            self.assertTrue(item.trash_only)
+            self.assertIsNotNone(item.local_size)
+            self.assertIn("deletion syncs to every device", item.signals)
+            content_hash.assert_not_called()
+
     def test_skips_project_trees(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -122,6 +140,20 @@ class CleanerTests(unittest.TestCase):
             self.assertEqual((deleted, bytes_deleted, errors), (1, 10, []))
             self.assertFalse(selected_path.exists())
             self.assertTrue(kept_path.exists())
+
+    def test_permanent_delete_refuses_icloud_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_file(Path(folder), "cloud.dmg", 5)
+            file_stat = path.stat()
+            item = mac_cleaner.Candidate(
+                path, file_stat.st_size, "downloaded installer", 5, True,
+                file_stat.st_dev, file_stat.st_ino, file_stat.st_mtime_ns,
+                88, "Installers", (), "file", file_stat.st_size, True, True,
+            )
+            deleted, bytes_deleted, errors = mac_cleaner.delete_permanently([item])
+            self.assertEqual((deleted, bytes_deleted), (0, 0))
+            self.assertIn("only be moved to Trash", errors[0])
+            self.assertTrue(path.exists())
 
     def test_move_to_trash_uses_native_macos_operation(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -326,6 +358,7 @@ class GuiServerTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             payload = json.loads(response.read())
             self.assertIn("folders", payload)
+            self.assertIn("icloud_available", payload)
 
             body = json.dumps({"ids": [], "permanent": True})
             connection.request("POST", "/api/clean", body=body, headers={
@@ -335,6 +368,39 @@ class GuiServerTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 400)
             self.assertIn("typing DELETE", json.loads(response.read())["error"])
+
+            with tempfile.TemporaryDirectory() as folder:
+                cloud_path = Path(folder) / "cloud.dmg"
+                cloud_path.write_bytes(b"cloud")
+                file_stat = cloud_path.stat()
+                cloud = mac_cleaner.Candidate(
+                    cloud_path, file_stat.st_size, "downloaded installer", 5, True,
+                    file_stat.st_dev, file_stat.st_ino, file_stat.st_mtime_ns,
+                    88, "Installers", (), "file", file_stat.st_size, True, True,
+                )
+                cloud_id = mac_cleaner_gui.item_id(cloud)
+                with server.lock:
+                    server.items = {cloud_id: cloud}
+                body = json.dumps({
+                    "ids": [cloud_id], "confirm_review": True,
+                    "permanent": True, "confirm_permanent": "DELETE",
+                })
+                connection.request("POST", "/api/clean", body=body, headers={
+                    "Content-Type": "application/json",
+                    "X-Mac-Cleaner-Token": "test-token",
+                })
+                response = connection.getresponse()
+                self.assertEqual(response.status, 400)
+                self.assertIn("cannot be permanently deleted", json.loads(response.read())["error"])
+
+                body = json.dumps({"ids": [cloud_id], "confirm_review": True})
+                connection.request("POST", "/api/clean", body=body, headers={
+                    "Content-Type": "application/json",
+                    "X-Mac-Cleaner-Token": "test-token",
+                })
+                response = connection.getresponse()
+                self.assertEqual(response.status, 400)
+                self.assertIn("typing ICLOUD", json.loads(response.read())["error"])
 
             with tempfile.TemporaryDirectory() as folder:
                 installer = Path(folder) / "installer.dmg"

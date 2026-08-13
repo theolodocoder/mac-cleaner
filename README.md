@@ -95,6 +95,32 @@ disable it or `--empty-folders` to include empty directories. Known developer
 caches and local iPhone backups are available as explicitly reviewed, Trash-only
 directory candidates through `--developer-caches` and `--iphone-backups`.
 
+## iCloud Drive audit
+
+iCloud cleanup is deliberately opt-in. Add `--icloud-drive` to inspect the
+Finder-visible iCloud Drive alongside the normal Mac folders:
+
+```bash
+python3 mac_cleaner.py --icloud-drive --dry-run
+python3 mac_cleaner.py --icloud-drive
+```
+
+Every iCloud result is placed in **Needs review**, is excluded from `a`/`--yes`,
+and can only be moved to Trash. After selecting one, Mac Cleaner requires typing
+`ICLOUD` because the removal syncs to every device signed into that iCloud
+account. Finder/iCloud normally keeps deleted Drive files recoverable for up to
+30 days, but Mac Cleaner never treats that as a substitute for a backup.
+
+The audit uses filesystem metadata and does not hash iCloud files, avoiding
+content reads that could download cloud-only placeholders. Results show the
+logical iCloud size and an estimate of the bytes currently allocated on the Mac.
+The same audit is available as the optional **iCloud Drive audit** toggle under
+Advanced detectors in the GUI.
+
+This feature covers files exposed through iCloud Drive in Finder. Apple does not
+provide third-party apps general access to all iCloud Photos, Messages, Mail, or
+device-backup data, so Mac Cleaner does not claim to scan or delete those areas.
+
 ## Optional GUI
 
 Open the GUI only when you want it:
